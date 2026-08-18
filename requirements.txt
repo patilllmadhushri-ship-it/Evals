@@ -1,0 +1,7 @@
+streamlit>=1.36
+requests>=2.31
+numpy>=1.26
+soundfile>=0.12.1
+pandas>=2.0
+XlsxWriter>=3.1
+anthropic>=0.40
