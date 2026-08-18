@@ -48,9 +48,12 @@ class Language:
 
 
 LANGUAGES: list[Language] = [
+    # English variants — accent matters as much as language for STT accuracy.
     Language("en-IN", "English (India)"),
     Language("en-US", "English (US)"),
     Language("en-GB", "English (UK)"),
+    Language("en-AU", "English (Australia)"),
+    # Indic
     Language("hi-IN", "Hindi"),
     Language("mr-IN", "Marathi"),
     Language("bn-IN", "Bengali"),
@@ -60,10 +63,38 @@ LANGUAGES: list[Language] = [
     Language("ml-IN", "Malayalam"),
     Language("gu-IN", "Gujarati"),
     Language("pa-IN", "Punjabi"),
+    Language("od-IN", "Odia"),
+    Language("as-IN", "Assamese"),
+    Language("ur-IN", "Urdu"),
+    # European
     Language("es-ES", "Spanish (Spain)"),
+    Language("es-419", "Spanish (Latin America)"),
+    Language("pt-BR", "Portuguese (Brazil)"),
+    Language("pt-PT", "Portuguese (Portugal)"),
     Language("fr-FR", "French"),
     Language("de-DE", "German"),
+    Language("it-IT", "Italian"),
+    Language("nl-NL", "Dutch"),
+    Language("pl-PL", "Polish"),
+    Language("sv-SE", "Swedish"),
+    Language("da-DK", "Danish"),
+    Language("uk-UA", "Ukrainian"),
+    Language("ru-RU", "Russian"),
+    Language("tr-TR", "Turkish"),
+    # Middle East & Africa
+    Language("ar-SA", "Arabic (Gulf)"),
+    Language("ar-EG", "Arabic (Egypt)"),
+    Language("he-IL", "Hebrew"),
+    Language("sw-KE", "Swahili"),
+    # East & Southeast Asia
+    Language("zh-CN", "Chinese (Mandarin, Simplified)"),
     Language("ja-JP", "Japanese"),
+    Language("ko-KR", "Korean"),
+    Language("id-ID", "Indonesian"),
+    Language("vi-VN", "Vietnamese"),
+    Language("th-TH", "Thai"),
+    Language("ms-MY", "Malay"),
+    Language("tl-PH", "Filipino"),
 ]
 
 LANGUAGE_LABELS = {lang.code: lang.label for lang in LANGUAGES}
@@ -85,5 +116,11 @@ RATE_TABLE_NOTE = (
 )
 
 # Languages where word boundaries are ambiguous — CER is the more meaningful
-# deterministic metric there.
-CHARACTER_ORIENTED_LANGUAGES = {"ja-JP", "zh-CN", "th-TH"}
+# deterministic metric there, and the UI says so.
+CHARACTER_ORIENTED_LANGUAGES = {"ja-JP", "zh-CN", "th-TH", "ms-MY"}
+
+LANGUAGE_SUPPORT_NOTE = (
+    "Per-provider language support is a bundled snapshot and providers add "
+    "languages regularly. If a provider you expect is missing for a language, "
+    "check its current docs — the list here is conservative, not authoritative."
+)

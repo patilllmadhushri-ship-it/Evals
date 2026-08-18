@@ -16,11 +16,13 @@ import streamlit as st
 
 from stt_eval import costs, export, report
 from stt_eval.config import (
+    CHARACTER_ORIENTED_LANGUAGES,
     DEFAULT_CONCURRENCY,
     DEFAULT_JUDGE_MODEL,
     DEFAULT_RETRIES,
     DEFAULT_SAMPLE_RATE,
     JUDGE_MODELS,
+    LANGUAGE_SUPPORT_NOTE,
     LANGUAGES,
     MAX_CONCURRENCY,
     RATE_TABLE_NOTE,
@@ -278,14 +280,24 @@ def step_configure() -> None:
         codes,
         index=codes.index(st.session_state.language) if st.session_state.language in codes else 0,
         format_func=lambda code: labels[code],
+        help="Providers are filtered to those that support the language you pick.",
     )
     language = st.session_state.language
 
     available = providers_for_language(language)
     unavailable = [key for key in PROVIDER_CLASSES if key not in available]
 
+    if language in CHARACTER_ORIENTED_LANGUAGES:
+        st.info(
+            f"{labels[language]} has ambiguous word boundaries — read **CER** as the "
+            "primary deterministic metric here, not WER."
+        )
+
     st.subheader("Providers")
-    st.caption("Only providers that support the selected language are listed.")
+    st.caption(
+        f"{len(available)} of {len(PROVIDER_CLASSES)} providers support "
+        f"{labels[language]}. " + LANGUAGE_SUPPORT_NOTE
+    )
     selected = st.multiselect(
         "Compare",
         available,

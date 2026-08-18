@@ -70,6 +70,32 @@ def main() -> int:
     check("WER penalises the reworded number", evaluation.value("wer") > 0)
     check("CER computed", evaluation.value("cer") is not None)
 
+    print("language / provider matrix")
+    from stt_eval.config import LANGUAGES
+    from stt_eval.providers import PROVIDER_CLASSES, providers_for_language
+
+    codes = [lang.code for lang in LANGUAGES]
+    check("no duplicate language codes", len(codes) == len(set(codes)))
+    check(
+        "every language has at least one provider",
+        all(providers_for_language(code) for code in codes),
+    )
+    check("Sarvam is Indic-only", "sarvam" not in providers_for_language("ja-JP"))
+    check("Sarvam covers Hindi", "sarvam" in providers_for_language("hi-IN"))
+    check(
+        "provider language sets only use canonical codes",
+        all(
+            cls.supported_languages <= set(codes)
+            for cls in PROVIDER_CLASSES.values()
+            if cls.supported_languages
+        ),
+    )
+    check(
+        "Google maps Odia to its own code",
+        GoogleProvider("k").language_code("od-IN") == "or-IN"
+        and GoogleProvider("k").language_code("hi-IN") == "hi-IN",
+    )
+
     print("csv parsing")
     mapping, errors = parse_ground_truth_csv(
         b"id,text\nclip1,hello world\nclip2,\n", "ground_truth.csv"

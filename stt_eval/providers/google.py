@@ -12,10 +12,32 @@ from .base import ProviderError, STTProvider, Transcription
 ENDPOINT = "https://speech.googleapis.com/v1/speech:recognize"
 
 
+# Google's coverage is the broadest of the four; this is the app's list minus
+# the codes Google does not recognise.
+SUPPORTED = frozenset(
+    {
+        "en-IN", "en-US", "en-GB", "en-AU",
+        "hi-IN", "mr-IN", "bn-IN", "ta-IN", "te-IN", "kn-IN", "ml-IN", "gu-IN",
+        "pa-IN", "od-IN", "ur-IN",
+        "es-ES", "es-419", "pt-BR", "pt-PT", "fr-FR", "de-DE", "it-IT", "nl-NL",
+        "pl-PL", "sv-SE", "da-DK", "uk-UA", "ru-RU", "tr-TR",
+        "ar-SA", "ar-EG", "he-IL", "sw-KE",
+        "zh-CN", "ja-JP", "ko-KR", "id-ID", "vi-VN", "th-TH", "ms-MY", "tl-PH",
+    }
+)
+
+
 class GoogleProvider(STTProvider):
     key = "google"
     label = "Google Speech-to-Text"
     credential_hint = "Google Cloud API key with the Speech-to-Text API enabled"
+    supported_languages = SUPPORTED
+    language_code_overrides = {
+        "od-IN": "or-IN",      # Google spells Odia 'or'
+        "es-419": "es-US",     # Google has no es-419; es-US is the LatAm model
+        "tl-PH": "fil-PH",     # Google spells Filipino 'fil'
+        "pa-IN": "pa-Guru-IN",  # Punjabi requires the script subtag
+    }
 
     def __init__(self, api_key: str, *, model: str = "", timeout: float = 180.0):
         super().__init__(api_key, timeout=timeout)
@@ -37,7 +59,7 @@ class GoogleProvider(STTProvider):
                 # rate can never disagree with the bytes being sent.
                 "sampleRateHertz": rate,
                 "audioChannelCount": 1,
-                "languageCode": language,
+                "languageCode": self.language_code(language),
                 "model": self._model_for(rate),
                 "useEnhanced": True,
                 "enableAutomaticPunctuation": True,

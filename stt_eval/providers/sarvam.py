@@ -8,6 +8,7 @@ from .base import ProviderError, STTProvider, Transcription
 
 ENDPOINT = "https://api.sarvam.ai/speech-to-text"
 
+# Indic-only by design — this is what Sarvam is built for.
 SUPPORTED = frozenset(
     {
         "en-IN", "hi-IN", "bn-IN", "gu-IN", "kn-IN", "ml-IN",

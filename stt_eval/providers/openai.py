@@ -4,15 +4,24 @@ from __future__ import annotations
 
 import requests
 
+from ..config import LANGUAGES
 from .base import ProviderError, STTProvider, Transcription
 
 ENDPOINT = "https://api.openai.com/v1/audio/transcriptions"
+
+
+# Whisper-family models cover ~99 languages; every code in the app's list is
+# supported except Odia, which Whisper does not recognise. Declared as a class
+# attribute so the registry's language filter sees it without instantiating.
+UNSUPPORTED = frozenset({"od-IN"})
+SUPPORTED = frozenset(lang.code for lang in LANGUAGES) - UNSUPPORTED
 
 
 class OpenAIProvider(STTProvider):
     key = "openai"
     label = "OpenAI"
     credential_hint = "OpenAI API key (platform.openai.com)"
+    supported_languages = SUPPORTED
 
     def __init__(self, api_key: str, *, model: str = "gpt-4o-transcribe", timeout: float = 180.0):
         super().__init__(api_key, timeout=timeout)

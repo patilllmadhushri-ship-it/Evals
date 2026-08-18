@@ -9,11 +9,23 @@ from .base import ProviderError, STTProvider, Transcription
 
 ENDPOINT = "https://api.deepgram.com/v1/listen"
 
+# Conservative snapshot of the nova family's language coverage.
+SUPPORTED = frozenset(
+    {
+        "en-IN", "en-US", "en-GB", "en-AU",
+        "hi-IN", "ta-IN", "te-IN", "mr-IN", "bn-IN", "gu-IN", "ml-IN", "kn-IN", "pa-IN",
+        "es-ES", "es-419", "pt-BR", "pt-PT", "fr-FR", "de-DE", "it-IT", "nl-NL",
+        "pl-PL", "sv-SE", "da-DK", "uk-UA", "ru-RU", "tr-TR",
+        "zh-CN", "ja-JP", "ko-KR", "id-ID", "vi-VN", "th-TH", "ms-MY", "tl-PH",
+    }
+)
+
 
 class DeepgramProvider(STTProvider):
     key = "deepgram"
     label = "Deepgram"
     credential_hint = "Deepgram API key (console.deepgram.com)"
+    supported_languages = SUPPORTED
 
     def __init__(self, api_key: str, *, model: str = "", timeout: float = 180.0):
         super().__init__(api_key, timeout=timeout)

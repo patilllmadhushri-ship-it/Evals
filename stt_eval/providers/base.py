@@ -41,8 +41,20 @@ class STTProvider:
         self.api_key = api_key
         self.timeout = timeout
 
+    #: Canonical app language code -> this provider's code, where they differ.
+    #: Anything absent is passed through unchanged.
+    language_code_overrides: dict[str, str] = {}
+
     def supports(self, language: str) -> bool:
         return not self.supported_languages or language in self.supported_languages
+
+    def language_code(self, language: str) -> str:
+        """Translate the app's canonical code into the provider's own code.
+
+        The app keeps one canonical code per language so results are comparable
+        across providers; each provider maps it to whatever its API expects.
+        """
+        return self.language_code_overrides.get(language, language)
 
     def transcribe(self, audio: bytes, language: str) -> Transcription:
         """Transcribe mono 16 kHz 16-bit PCM WAV `audio`."""
