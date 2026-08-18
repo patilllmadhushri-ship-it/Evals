@@ -68,7 +68,12 @@ Rate metrics aggregate as **pooled** figures — summed errors over summed refer
 
 **Resumability.** Results are written to SQLite as each pair completes, not at the end ([`stt_eval/store.py`](stt_eval/store.py)). A browser refresh or a dropped connection loses nothing, and re-running the same run id with an added clip or an added provider processes only the new work — completed pairs are neither re-transcribed nor re-scored.
 
-**Audio normalisation.** Every clip is converted to mono 16 kHz 16-bit PCM before it reaches any provider, so accuracy differences reflect the provider rather than the encoding of whatever file was uploaded. WAV/FLAC/OGG decode via libsndfile; MP3/M4A/WebM fall back to `ffmpeg` if it is on your PATH.
+**Audio normalisation, at 8 kHz or 16 kHz.** Every clip is converted to mono 16-bit PCM at one run-level sample rate before it reaches any provider, so accuracy differences reflect the provider rather than the encoding of whatever file was uploaded. Choose the rate in step 1:
+
+- **8 kHz — narrowband** for telephony, IVR and call recordings. Benchmark at the rate your production audio actually arrives at: upsampling a phone call to 16 kHz invents no information but does change how some models behave, so a 16 kHz benchmark can mispredict how a provider performs on your phone traffic. On a narrowband run, Deepgram and Google switch to their telephony models (`nova-2-phonecall`, `phone_call`) automatically.
+- **16 kHz — wideband** for mic capture, VoIP and most public datasets.
+
+The app warns when a clip had to be upsampled, and providers that must be told the rate explicitly read it from the WAV header of the payload they are about to send, so the declared rate can never disagree with the bytes. WAV/FLAC/OGG decode via libsndfile; MP3/M4A/WebM fall back to `ffmpeg` if it is on your PATH.
 
 **Secrets.** Provider and judge API keys live only in the current session's memory. They are never written to disk, to logs, or to any exported results file.
 

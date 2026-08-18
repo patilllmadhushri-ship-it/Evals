@@ -19,10 +19,12 @@ from stt_eval.config import (
     DEFAULT_CONCURRENCY,
     DEFAULT_JUDGE_MODEL,
     DEFAULT_RETRIES,
+    DEFAULT_SAMPLE_RATE,
     JUDGE_MODELS,
     LANGUAGES,
     MAX_CONCURRENCY,
     RATE_TABLE_NOTE,
+    SAMPLE_RATE_OPTIONS,
     SUPPORTED_UPLOAD_EXTENSIONS,
 )
 from stt_eval.dataset import build_dataset, clip_id_for, parse_ground_truth_csv
@@ -59,6 +61,7 @@ def init_state() -> None:
         "judge_key": "",
         "judge_model": DEFAULT_JUDGE_MODEL,
         "judge_effort": "medium",
+        "sample_rate": DEFAULT_SAMPLE_RATE,
         "concurrency": DEFAULT_CONCURRENCY,
         "inline_ground_truth": {},
         "dataset": None,
@@ -149,6 +152,26 @@ def step_upload() -> None:
     if audio_files:
         st.success(f"{len(audio_files)} audio file(s) ready.")
 
+    rates = list(SAMPLE_RATE_OPTIONS)
+    st.session_state.sample_rate = st.radio(
+        "Normalise every clip to",
+        rates,
+        index=rates.index(st.session_state.sample_rate)
+        if st.session_state.sample_rate in rates
+        else rates.index(DEFAULT_SAMPLE_RATE),
+        format_func=lambda rate: SAMPLE_RATE_OPTIONS[rate],
+        help=(
+            "Every provider in the run receives audio at this rate, so the numbers "
+            "stay comparable. Benchmark at the rate your production audio actually "
+            "arrives at — for phone traffic that is 8 kHz."
+        ),
+    )
+    if st.session_state.sample_rate <= 8_000:
+        st.caption(
+            "Narrowband run: Deepgram and Google switch to their telephony models "
+            "automatically."
+        )
+
     mode = st.radio(
         "Ground truth",
         ["CSV file (id, text)", "Type inline per clip"],
@@ -197,6 +220,7 @@ def step_upload() -> None:
                 audio_files,
                 ground_truth,
                 ground_truth_source=st.session_state.ground_truth_source,
+                sample_rate=st.session_state.sample_rate,
             )
         st.session_state.dataset = dataset
 
@@ -210,7 +234,8 @@ def step_upload() -> None:
         if dataset.is_runnable:
             st.success(
                 f"{len(dataset.clips)} clip(s) matched · "
-                f"{dataset.total_duration_minutes:.2f} minutes of audio."
+                f"{dataset.total_duration_minutes:.2f} minutes of audio · "
+                f"normalised to {dataset.sample_rate // 1000} kHz mono."
             )
             goto(1)
 
@@ -679,6 +704,7 @@ def step_export() -> None:
     metadata = {
         "run_id": st.session_state.run_id,
         "language": st.session_state.language,
+        "sample_rate_hz": st.session_state.sample_rate,
         "providers": ", ".join(st.session_state.selected_providers),
         "metrics": ", ".join(metrics),
         "judge_model": st.session_state.judge_model if uses_judge() else "not used",

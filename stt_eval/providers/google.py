@@ -6,7 +6,7 @@ import base64
 
 import requests
 
-from ..config import TARGET_SAMPLE_RATE
+from ..audio import wav_sample_rate
 from .base import ProviderError, STTProvider, Transcription
 
 ENDPOINT = "https://speech.googleapis.com/v1/speech:recognize"
@@ -17,18 +17,29 @@ class GoogleProvider(STTProvider):
     label = "Google Speech-to-Text"
     credential_hint = "Google Cloud API key with the Speech-to-Text API enabled"
 
-    def __init__(self, api_key: str, *, model: str = "latest_long", timeout: float = 180.0):
+    def __init__(self, api_key: str, *, model: str = "", timeout: float = 180.0):
         super().__init__(api_key, timeout=timeout)
+        #: Empty means "pick per sample rate" — Google ships a dedicated
+        #: narrowband model for telephony audio.
         self.model = model
 
+    def _model_for(self, sample_rate: int) -> str:
+        if self.model:
+            return self.model
+        return "phone_call" if sample_rate <= 8_000 else "latest_long"
+
     def transcribe(self, audio: bytes, language: str) -> Transcription:
+        rate = wav_sample_rate(audio)
         body = {
             "config": {
                 "encoding": "LINEAR16",
-                "sampleRateHertz": TARGET_SAMPLE_RATE,
+                # Read from the payload rather than assumed, so the declared
+                # rate can never disagree with the bytes being sent.
+                "sampleRateHertz": rate,
                 "audioChannelCount": 1,
                 "languageCode": language,
-                "model": self.model,
+                "model": self._model_for(rate),
+                "useEnhanced": True,
                 "enableAutomaticPunctuation": True,
             },
             # The WAV header is stripped by the service; sending the container is fine.

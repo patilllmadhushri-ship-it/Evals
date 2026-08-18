@@ -1,8 +1,10 @@
 """Audio normalisation.
 
-Every clip is converted to mono 16 kHz 16-bit PCM WAV before it is sent to any
-provider, so accuracy differences reflect the provider and not the encoding of
-the file the user happened to upload.
+Every clip is converted to mono 16-bit PCM WAV at one chosen sample rate before
+it is sent to any provider, so accuracy differences reflect the provider and not
+the encoding of the file the user happened to upload. The rate is a run-level
+choice — 8 kHz to benchmark telephony audio at the rate it actually arrives at,
+16 kHz for wideband capture.
 
 Two decoders are tried in order: libsndfile (via ``soundfile``), then ``ffmpeg``
 if it is on PATH. WAV/FLAC/OGG are handled by the first; MP3/M4A/WebM usually
@@ -22,7 +24,7 @@ from pathlib import Path
 
 import numpy as np
 
-from .config import TARGET_CHANNELS, TARGET_SAMPLE_RATE, TARGET_SAMPLE_WIDTH
+from .config import DEFAULT_SAMPLE_RATE, TARGET_CHANNELS, TARGET_SAMPLE_WIDTH
 
 
 class AudioError(RuntimeError):
@@ -34,10 +36,18 @@ class NormalizedAudio:
     wav_bytes: bytes
     duration_seconds: float
     source_name: str
+    sample_rate: int = DEFAULT_SAMPLE_RATE
+    #: Rate of the file as uploaded, before normalisation — used to warn when a
+    #: run upsamples narrowband audio and invents no new information.
+    source_sample_rate: int | None = None
 
     @property
     def duration_minutes(self) -> float:
         return self.duration_seconds / 60.0
+
+    @property
+    def upsampled(self) -> bool:
+        return self.source_sample_rate is not None and self.source_sample_rate < self.sample_rate
 
 
 def _to_wav_bytes(samples: np.ndarray, sample_rate: int) -> bytes:
@@ -80,7 +90,7 @@ def _decode_with_soundfile(raw: bytes) -> tuple[np.ndarray, int]:
     return np.asarray(data, dtype=np.float32), int(sample_rate)
 
 
-def _decode_with_ffmpeg(raw: bytes, suffix: str) -> tuple[np.ndarray, int]:
+def _decode_with_ffmpeg(raw: bytes, suffix: str, sample_rate: int) -> tuple[np.ndarray, int]:
     ffmpeg = shutil.which("ffmpeg")
     if not ffmpeg:
         raise AudioError("ffmpeg is not installed")
@@ -93,7 +103,7 @@ def _decode_with_ffmpeg(raw: bytes, suffix: str) -> tuple[np.ndarray, int]:
                 ffmpeg, "-hide_banner", "-loglevel", "error",
                 "-i", str(source),
                 "-ac", str(TARGET_CHANNELS),
-                "-ar", str(TARGET_SAMPLE_RATE),
+                "-ar", str(sample_rate),
                 "-f", "s16le", "-acodec", "pcm_s16le", "-",
             ],
             capture_output=True,
@@ -101,20 +111,27 @@ def _decode_with_ffmpeg(raw: bytes, suffix: str) -> tuple[np.ndarray, int]:
         if completed.returncode != 0:
             raise AudioError(completed.stderr.decode("utf-8", "replace").strip()[:400])
         pcm = np.frombuffer(completed.stdout, dtype="<i2").astype(np.float32) / 32768.0
-        return pcm, TARGET_SAMPLE_RATE
+        return pcm, sample_rate
 
 
-def normalize(raw: bytes, filename: str) -> NormalizedAudio:
-    """Decode `raw` and return mono 16 kHz 16-bit PCM WAV bytes plus duration."""
+def normalize(
+    raw: bytes, filename: str, *, sample_rate: int = DEFAULT_SAMPLE_RATE
+) -> NormalizedAudio:
+    """Decode `raw` and return mono 16-bit PCM WAV bytes at `sample_rate`.
+
+    `sample_rate` is the run-level target — 8000 for telephony audio, 16000 for
+    wideband. Every provider in the run receives the same rate, so the numbers
+    stay comparable.
+    """
     suffix = Path(filename).suffix.lower()
     errors: list[str] = []
 
     for decoder in (
         lambda: _decode_with_soundfile(raw),
-        lambda: _decode_with_ffmpeg(raw, suffix),
+        lambda: _decode_with_ffmpeg(raw, suffix, sample_rate),
     ):
         try:
-            samples, sample_rate = decoder()
+            samples, decoded_rate = decoder()
             break
         except AudioError as exc:
             errors.append(str(exc))
@@ -126,17 +143,20 @@ def normalize(raw: bytes, filename: str) -> NormalizedAudio:
             + " | ".join(errors)
         )
 
+    source_rate = decoded_rate
     if samples.ndim > 1:
         samples = samples.mean(axis=1)
-    samples = _resample(samples, sample_rate, TARGET_SAMPLE_RATE)
-    duration = float(samples.shape[0]) / TARGET_SAMPLE_RATE
+    samples = _resample(samples, decoded_rate, sample_rate)
+    duration = float(samples.shape[0]) / sample_rate
     if duration <= 0:
         raise AudioError(f"{filename} decoded to zero audio frames.")
 
     return NormalizedAudio(
-        wav_bytes=_to_wav_bytes(samples, TARGET_SAMPLE_RATE),
+        wav_bytes=_to_wav_bytes(samples, sample_rate),
         duration_seconds=duration,
         source_name=filename,
+        sample_rate=sample_rate,
+        source_sample_rate=source_rate,
     )
 
 
@@ -144,6 +164,16 @@ def wav_duration_seconds(wav_bytes: bytes) -> float:
     """Read the duration of a PCM WAV payload without fully decoding it."""
     with wave.open(io.BytesIO(wav_bytes), "rb") as handle:
         return handle.getnframes() / float(handle.getframerate())
+
+
+def wav_sample_rate(wav_bytes: bytes) -> int:
+    """Sample rate declared in a WAV header.
+
+    Providers that must be told the rate explicitly (Google) read it from the
+    payload they are about to send, so they can never disagree with it.
+    """
+    with wave.open(io.BytesIO(wav_bytes), "rb") as handle:
+        return handle.getframerate()
 
 
 def pcm_peak_dbfs(wav_bytes: bytes) -> float:

@@ -16,9 +16,12 @@ import wave
 from pathlib import Path
 
 from stt_eval import export, report
+from stt_eval.audio import wav_sample_rate
 from stt_eval.dataset import build_dataset, parse_ground_truth_csv
 from stt_eval.metrics import evaluate_pair
 from stt_eval.metrics.align import align, tokenize_words
+from stt_eval.providers.deepgram import DeepgramProvider
+from stt_eval.providers.google import GoogleProvider
 from stt_eval.runner import RunConfig, Runner
 from stt_eval.store import ResultStore
 
@@ -79,6 +82,32 @@ def main() -> int:
     dataset = build_dataset(uploads, GROUND_TRUTH)
     check("all clips matched", len(dataset.clips) == 3 and not dataset.errors)
     check("audio normalised to 16 kHz mono", dataset.clips[0].audio.wav_bytes[:4] == b"RIFF")
+
+    narrowband = build_dataset(uploads, GROUND_TRUTH, sample_rate=8_000)
+    check("8 kHz normalisation", narrowband.clips[0].audio.sample_rate == 8_000)
+    check(
+        "8 kHz WAV header agrees with the payload",
+        wav_sample_rate(narrowband.clips[0].audio.wav_bytes) == 8_000,
+    )
+    check(
+        "duration preserved across resampling",
+        abs(narrowband.clips[0].duration_seconds - dataset.clips[0].duration_seconds) < 0.01,
+    )
+    upsample = build_dataset(uploads, GROUND_TRUTH, sample_rate=48_000)
+    check(
+        "upsampling is warned about",
+        any("Upsampled" in message for message in upsample.warnings),
+    )
+    check(
+        "telephony model chosen at 8 kHz",
+        DeepgramProvider("k")._model_for(8_000) == "nova-2-phonecall"
+        and GoogleProvider("k")._model_for(8_000) == "phone_call",
+    )
+    check(
+        "wideband model chosen at 16 kHz",
+        DeepgramProvider("k")._model_for(16_000) == "nova-3"
+        and GoogleProvider("k")._model_for(16_000) == "latest_long",
+    )
 
     unmatched = build_dataset([("orphan.wav", make_wav(0.5))], GROUND_TRUTH)
     check(

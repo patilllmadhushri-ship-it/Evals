@@ -10,9 +10,19 @@ from dataclasses import dataclass
 
 # Target audio format every provider receives, so accuracy differences reflect
 # the provider rather than the input encoding.
-TARGET_SAMPLE_RATE = 16_000
+DEFAULT_SAMPLE_RATE = 16_000
+TARGET_SAMPLE_RATE = DEFAULT_SAMPLE_RATE  # back-compat alias
 TARGET_CHANNELS = 1
 TARGET_SAMPLE_WIDTH = 2  # 16-bit PCM
+
+# Telephony audio is narrowband 8 kHz. Evaluating at the rate your production
+# audio actually arrives at matters: upsampling a phone call to 16 kHz invents
+# no new information but does change how some providers' models behave, so a
+# 16 kHz benchmark can mispredict how a provider performs on your phone traffic.
+SAMPLE_RATE_OPTIONS = {
+    8_000: "8 kHz — narrowband (telephony, IVR, call recordings)",
+    16_000: "16 kHz — wideband (mic capture, VoIP, most datasets)",
+}
 
 SUPPORTED_UPLOAD_EXTENSIONS = ["wav", "mp3", "m4a", "flac", "ogg", "webm", "aac"]
 

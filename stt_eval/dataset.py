@@ -14,6 +14,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from .audio import AudioError, NormalizedAudio, normalize
+from .config import DEFAULT_SAMPLE_RATE
 
 
 @dataclass
@@ -33,6 +34,8 @@ class Dataset:
     clips: list[Clip] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
+    #: The rate every clip was normalised to for this run.
+    sample_rate: int = DEFAULT_SAMPLE_RATE
 
     @property
     def is_runnable(self) -> bool:
@@ -100,14 +103,17 @@ def build_dataset(
     ground_truth: dict[str, str],
     *,
     ground_truth_source: str = "ground_truth.csv",
+    sample_rate: int = DEFAULT_SAMPLE_RATE,
 ) -> Dataset:
     """Decode every upload, match it to its ground truth, and report both directions.
 
     `uploads` is a list of (filename, raw bytes). `ground_truth` maps clip id to
-    the correct transcript.
+    the correct transcript. `sample_rate` is the run-level normalisation target
+    (8000 for telephony audio, 16000 for wideband).
     """
-    dataset = Dataset()
+    dataset = Dataset(sample_rate=sample_rate)
     seen_ids: set[str] = set()
+    upsampled: list[str] = []
 
     for filename, raw in uploads:
         clip_id = clip_id_for(filename)
@@ -127,10 +133,13 @@ def build_dataset(
             continue
 
         try:
-            audio = normalize(raw, filename)
+            audio = normalize(raw, filename, sample_rate=sample_rate)
         except AudioError as exc:
             dataset.errors.append(f"{filename}: {exc}")
             continue
+
+        if audio.upsampled:
+            upsampled.append(f"{filename} ({audio.source_sample_rate} Hz)")
 
         if audio.duration_seconds < 0.2:
             dataset.warnings.append(
@@ -148,6 +157,14 @@ def build_dataset(
                 f"{ground_truth_source} has a row for '{row_id}' but no audio file "
                 f"named '{row_id}.<ext>' was uploaded."
             )
+
+    if upsampled:
+        dataset.warnings.append(
+            f"Upsampled to {sample_rate} Hz from a lower rate: {', '.join(upsampled[:5])}"
+            + (f" and {len(upsampled) - 5} more" if len(upsampled) > 5 else "")
+            + ". Upsampling adds no information — if this is telephony audio, "
+            "run at 8 kHz to measure what your providers actually see in production."
+        )
 
     if not uploads:
         dataset.errors.append("No audio files uploaded.")
