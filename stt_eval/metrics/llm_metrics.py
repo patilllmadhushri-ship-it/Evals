@@ -9,20 +9,13 @@ reasoning so a user can see *why* a clip passed or failed.
 from __future__ import annotations
 
 from ..judge import Judge
+from ..prompts import JUDGE_SYSTEM_PROMPT
 from .align import differing_segments
 from .base import MetricValue
 from .wer import DeterministicScores, score_deterministic
 
-_SYSTEM = (
-    "You are a careful speech-recognition evaluator. You compare a correct "
-    "reference transcript against a speech-to-text system's output and judge "
-    "whether differences change the meaning. Ignore casing, punctuation and "
-    "formatting. Treat different surface forms of the same value as equivalent "
-    "(\"500\" and \"five hundred\", \"Dr.\" and \"doctor\", \"2pm\" and \"two "
-    "o'clock in the afternoon\"). Treat a changed name, number, amount, date, "
-    "negation or instruction as a real error. Be specific and brief in your "
-    "reasoning; cite the exact words you are judging."
-)
+#: Every metric judges against the same rules — see `stt_eval/prompts.py`.
+_SYSTEM = JUDGE_SYSTEM_PROMPT
 
 
 def _context(ground_truth: str, prediction: str, language: str) -> str:

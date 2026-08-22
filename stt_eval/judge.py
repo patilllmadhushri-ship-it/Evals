@@ -1,45 +1,163 @@
-"""A single configurable judge client.
+"""Judge clients — one interface, swappable backends.
 
-Every LLM-based metric is routed through this one class so the judge model can
-be swapped without touching each metric's implementation. The key lives only in
-this object, for the lifetime of the run — it is never written to disk, logs or
-any exported results file.
+Every LLM-based metric routes through a `Judge`, so the judging model can be
+changed without touching a single metric. Two backends ship:
+
+* **Anthropic** — Claude directly, with server-enforced JSON schemas.
+* **OpenRouter** — any model on OpenRouter, including reasoning models, with a
+  unified `reasoning` effort control and per-call cost reported by the API.
+
+Keys live only in the judge object for the lifetime of the run. They are never
+written to the results database, the logs, or an exported file.
 """
 
 from __future__ import annotations
 
 import json
+import re
 import threading
 from dataclasses import dataclass, field
 
-from .config import DEFAULT_JUDGE_MODEL, JUDGE_PRICING
+from .config import (
+    DEFAULT_JUDGE_MODEL,
+    DEFAULT_OPENROUTER_MODEL,
+    JUDGE_PRICING,
+    OPENROUTER_REFERER,
+    OPENROUTER_TITLE,
+)
+from .prompts import JSON_ONLY_INSTRUCTION, JUDGE_SYSTEM_PROMPT
+
+ANTHROPIC_BACKEND = "anthropic"
+OPENROUTER_BACKEND = "openrouter"
 
 
 class JudgeError(RuntimeError):
-    """A judge call failed. Callers isolate this per metric."""
+    """A judge call failed. Callers isolate this per metric, so one failing
+    metric never blocks the others."""
 
 
 @dataclass
 class JudgeUsage:
     input_tokens: int = 0
     output_tokens: int = 0
+    reasoning_tokens: int = 0
     calls: int = 0
+    #: Cost reported by the provider itself, when it reports one.
+    reported_cost_usd: float = 0.0
 
-    def cost_usd(self, model: str) -> float:
-        input_rate, output_rate = JUDGE_PRICING.get(model, (0.0, 0.0))
-        return (
-            self.input_tokens * input_rate + self.output_tokens * output_rate
-        ) / 1_000_000
+
+def _extract_json(text: str) -> dict:
+    """Parse a JSON object out of a model response.
+
+    Reasoning models sometimes wrap the object in a fenced block or prepend a
+    stray line despite instructions, so fall back to the first balanced object
+    rather than failing the whole metric on a cosmetic wrapper.
+    """
+    candidate = (text or "").strip()
+    if not candidate:
+        raise JudgeError("The judge returned an empty response.")
+
+    fenced = re.match(r"^```(?:json)?\s*(.+?)\s*```$", candidate, flags=re.DOTALL)
+    if fenced:
+        candidate = fenced.group(1).strip()
+
+    try:
+        return json.loads(candidate)
+    except json.JSONDecodeError:
+        pass
+
+    start = candidate.find("{")
+    if start != -1:
+        depth = 0
+        in_string = False
+        escaped = False
+        for index in range(start, len(candidate)):
+            char = candidate[index]
+            if in_string:
+                if escaped:
+                    escaped = False
+                elif char == "\\":
+                    escaped = True
+                elif char == '"':
+                    in_string = False
+                continue
+            if char == '"':
+                in_string = True
+            elif char == "{":
+                depth += 1
+            elif char == "}":
+                depth -= 1
+                if depth == 0:
+                    try:
+                        return json.loads(candidate[start : index + 1])
+                    except json.JSONDecodeError:
+                        break
+
+    raise JudgeError(f"The judge returned unparseable JSON: {candidate[:200]}")
 
 
 @dataclass
 class Judge:
+    """Base judge. Subclasses implement `_call`; everything else is shared."""
+
     api_key: str
-    model: str = DEFAULT_JUDGE_MODEL
+    model: str
     effort: str = "medium"
     max_tokens: int = 8000
     usage: JudgeUsage = field(default_factory=JudgeUsage)
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
+
+    #: Registry key of the backend, for display and export metadata.
+    backend: str = "base"
+
+    @property
+    def system_prompt(self) -> str:
+        return JUDGE_SYSTEM_PROMPT
+
+    def ask_json(self, *, system: str | None = None, prompt: str, schema: dict) -> dict:
+        raise NotImplementedError
+
+    def _record(self, *, input_tokens: int, output_tokens: int, reasoning_tokens: int = 0, cost: float = 0.0) -> None:
+        with self._lock:
+            self.usage.calls += 1
+            self.usage.input_tokens += input_tokens or 0
+            self.usage.output_tokens += output_tokens or 0
+            self.usage.reasoning_tokens += reasoning_tokens or 0
+            self.usage.reported_cost_usd += cost or 0.0
+
+    def estimated_cost_usd(self) -> float:
+        """Provider-reported cost when available, else the bundled rate table."""
+        with self._lock:
+            if self.usage.reported_cost_usd:
+                return self.usage.reported_cost_usd
+            input_rate, output_rate = JUDGE_PRICING.get(self.model, (0.0, 0.0))
+            return (
+                self.usage.input_tokens * input_rate
+                + self.usage.output_tokens * output_rate
+            ) / 1_000_000
+
+    def check(self) -> None:
+        """Cheap round-trip so a bad key or model fails at setup, not mid-run."""
+        payload = self.ask_json(
+            system="You validate connectivity. Reply with the JSON object only.",
+            prompt='Reply with exactly {"ok": true}.',
+            schema={
+                "type": "object",
+                "properties": {"ok": {"type": "boolean"}},
+                "required": ["ok"],
+                "additionalProperties": False,
+            },
+        )
+        if not payload.get("ok"):
+            raise JudgeError(f"Unexpected validation response: {payload}")
+
+
+@dataclass
+class AnthropicJudge(Judge):
+    """Claude via the Anthropic SDK, with server-enforced JSON schemas."""
+
+    model: str = DEFAULT_JUDGE_MODEL
+    backend: str = ANTHROPIC_BACKEND
     _client: object | None = field(default=None, repr=False)
 
     def _ensure_client(self):
@@ -48,20 +166,19 @@ class Judge:
                 import anthropic
             except ImportError as exc:  # pragma: no cover - dependency guard
                 raise JudgeError(
-                    "The 'anthropic' package is required for LLM-based metrics. "
+                    "The 'anthropic' package is required for the Anthropic judge. "
                     "Install it with: pip install anthropic"
                 ) from exc
             self._client = anthropic.Anthropic(api_key=self.api_key, max_retries=3)
         return self._client
 
-    def ask_json(self, *, system: str, prompt: str, schema: dict) -> dict:
-        """Run one judged call and return its parsed, schema-constrained JSON."""
+    def ask_json(self, *, system: str | None = None, prompt: str, schema: dict) -> dict:
         client = self._ensure_client()
         try:
             response = client.messages.create(
                 model=self.model,
                 max_tokens=self.max_tokens,
-                system=system,
+                system=system or self.system_prompt,
                 output_config={
                     "effort": self.effort,
                     "format": {"type": "json_schema", "schema": schema},
@@ -76,35 +193,140 @@ class Judge:
 
         usage = getattr(response, "usage", None)
         if usage is not None:
-            with self._lock:
-                self.usage.calls += 1
-                self.usage.input_tokens += getattr(usage, "input_tokens", 0) or 0
-                self.usage.output_tokens += getattr(usage, "output_tokens", 0) or 0
+            self._record(
+                input_tokens=getattr(usage, "input_tokens", 0) or 0,
+                output_tokens=getattr(usage, "output_tokens", 0) or 0,
+            )
 
         text = next(
             (block.text for block in response.content if getattr(block, "type", "") == "text"),
             "",
         )
-        if not text.strip():
-            raise JudgeError("The judge returned an empty response.")
-        try:
-            return json.loads(text)
-        except json.JSONDecodeError as exc:
-            raise JudgeError(f"The judge returned unparseable JSON: {text[:200]}") from exc
+        return _extract_json(text)
 
-    def estimated_cost_usd(self) -> float:
-        with self._lock:
-            return self.usage.cost_usd(self.model)
 
-    def check(self) -> None:
-        """Cheap round-trip so a bad key fails at setup, not mid-run."""
-        self.ask_json(
-            system="You validate connectivity. Answer exactly.",
-            prompt="Reply with {\"ok\": true}.",
-            schema={
-                "type": "object",
-                "properties": {"ok": {"type": "boolean"}},
-                "required": ["ok"],
-                "additionalProperties": False,
-            },
-        )
+@dataclass
+class OpenRouterJudge(Judge):
+    """Any OpenRouter model, including reasoning models.
+
+    Reasoning effort maps to OpenRouter's unified `reasoning` parameter, so the
+    same setting works across model families. Structured output is requested
+    via `response_format`; models that reject it fall back to a JSON-only
+    instruction in the prompt, which the tolerant parser then handles.
+    """
+
+    model: str = DEFAULT_OPENROUTER_MODEL
+    backend: str = OPENROUTER_BACKEND
+    endpoint: str = "https://openrouter.ai/api/v1/chat/completions"
+    timeout: float = 240.0
+    #: Set once a model has rejected response_format, so we stop retrying it.
+    _schema_unsupported: bool = field(default=False, repr=False)
+
+    def _headers(self) -> dict[str, str]:
+        return {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json",
+            # Optional attribution headers OpenRouter uses for its dashboards.
+            "HTTP-Referer": OPENROUTER_REFERER,
+            "X-Title": OPENROUTER_TITLE,
+        }
+
+    def _body(self, *, system: str, prompt: str, schema: dict, with_schema: bool) -> dict:
+        body: dict = {
+            "model": self.model,
+            "messages": [
+                {"role": "system", "content": system},
+                {"role": "user", "content": prompt},
+            ],
+            "max_tokens": self.max_tokens,
+            # Unified across model families — reasoning models spend more
+            # thinking, non-reasoning models ignore it.
+            "reasoning": {"effort": self.effort},
+            # Ask OpenRouter to report what the call actually cost.
+            "usage": {"include": True},
+        }
+        if with_schema:
+            body["response_format"] = {
+                "type": "json_schema",
+                "json_schema": {"name": "stt_eval", "strict": True, "schema": schema},
+            }
+        else:
+            body["messages"][1]["content"] = (
+                prompt
+                + "\n\n"
+                + JSON_ONLY_INSTRUCTION.format(schema=json.dumps(schema, indent=2))
+            )
+        return body
+
+    def ask_json(self, *, system: str | None = None, prompt: str, schema: dict) -> dict:
+        import requests
+
+        system_prompt = system or self.system_prompt
+        attempts = [not self._schema_unsupported]
+        if attempts[0]:
+            attempts.append(False)  # retry without response_format on rejection
+
+        last_error: str = ""
+        for with_schema in attempts:
+            body = self._body(
+                system=system_prompt, prompt=prompt, schema=schema, with_schema=with_schema
+            )
+            try:
+                response = requests.post(
+                    self.endpoint, headers=self._headers(), json=body, timeout=self.timeout
+                )
+            except requests.RequestException as exc:
+                raise JudgeError(f"OpenRouter request failed: {exc}") from exc
+
+            if response.status_code >= 400:
+                detail = (response.text or "")[:300]
+                # A model that cannot do structured output says so with a 4xx;
+                # remember that and use the prompt-only path from here on.
+                if with_schema and response.status_code < 500 and (
+                    "response_format" in detail or "json_schema" in detail
+                ):
+                    self._schema_unsupported = True
+                    last_error = detail
+                    continue
+                raise JudgeError(f"OpenRouter returned HTTP {response.status_code}: {detail}")
+
+            payload = response.json()
+            if "error" in payload and payload["error"]:
+                raise JudgeError(f"OpenRouter error: {str(payload['error'])[:300]}")
+
+            usage = payload.get("usage") or {}
+            details = usage.get("completion_tokens_details") or {}
+            self._record(
+                input_tokens=usage.get("prompt_tokens", 0),
+                output_tokens=usage.get("completion_tokens", 0),
+                reasoning_tokens=details.get("reasoning_tokens", 0),
+                cost=float(usage.get("cost") or 0.0),
+            )
+
+            choices = payload.get("choices") or []
+            if not choices:
+                raise JudgeError(f"OpenRouter returned no choices: {str(payload)[:200]}")
+            message = choices[0].get("message") or {}
+            text = message.get("content") or ""
+            if not text.strip():
+                finish = choices[0].get("finish_reason")
+                raise JudgeError(
+                    "The judge returned no content"
+                    + (f" (finish_reason={finish})" if finish else "")
+                    + ". Reasoning models can spend the whole budget thinking — "
+                    "try a higher max_tokens or a lower effort."
+                )
+            return _extract_json(text)
+
+        raise JudgeError(f"OpenRouter rejected the request: {last_error}")
+
+
+def create_judge(
+    *, backend: str, api_key: str, model: str, effort: str = "medium", max_tokens: int = 8000
+) -> Judge:
+    """Build the judge for `backend`. This is the only place a backend is chosen."""
+    if backend == ANTHROPIC_BACKEND:
+        return AnthropicJudge(api_key=api_key, model=model, effort=effort, max_tokens=max_tokens)
+    if backend == OPENROUTER_BACKEND:
+        return OpenRouterJudge(api_key=api_key, model=model, effort=effort, max_tokens=max_tokens)
+    raise JudgeError(f"Unknown judge backend: {backend}")

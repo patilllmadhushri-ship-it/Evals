@@ -21,16 +21,19 @@ from stt_eval.config import (
     DEFAULT_JUDGE_MODEL,
     DEFAULT_RETRIES,
     DEFAULT_SAMPLE_RATE,
+    JUDGE_BACKENDS,
     JUDGE_MODELS,
     LANGUAGE_SUPPORT_NOTE,
     LANGUAGES,
     MAX_CONCURRENCY,
+    OPENROUTER_MODELS,
     RATE_TABLE_NOTE,
     SAMPLE_RATE_OPTIONS,
     SUPPORTED_UPLOAD_EXTENSIONS,
 )
 from stt_eval.dataset import build_dataset, clip_id_for, parse_ground_truth_csv
-from stt_eval.judge import Judge, JudgeError
+from stt_eval.judge import JudgeError, create_judge
+from stt_eval.prompts import JUDGE_SYSTEM_PROMPT
 from stt_eval.metrics import LLM_KEYS, METRIC_SPECS, METRICS_BY_KEY
 from stt_eval.providers import (
     PROVIDER_CLASSES,
@@ -66,7 +69,8 @@ def init_state() -> None:
         "api_keys": {
             provider: env.provider_key(provider) for provider in env.PROVIDER_ENV_VARS
         },
-        "judge_key": env.judge_key(),
+        "judge_backend": "anthropic",
+        "judge_key": env.judge_key("anthropic"),
         "judge_model": DEFAULT_JUDGE_MODEL,
         "judge_effort": "medium",
         "sample_rate": DEFAULT_SAMPLE_RATE,
@@ -437,42 +441,97 @@ def step_credentials() -> None:
         st.divider()
         st.subheader("LLM judge")
         st.caption(
-            "All meaning-aware metrics route through one judge client, so the "
-            "judge model can be swapped without changing any metric."
+            "Every meaning-aware metric routes through one judge client against "
+            "one shared system prompt, so a verdict means the same thing whichever "
+            "backend and model you pick."
         )
+
+        backends = list(JUDGE_BACKENDS)
+        st.session_state.judge_backend = st.radio(
+            "Backend",
+            backends,
+            index=backends.index(st.session_state.judge_backend)
+            if st.session_state.judge_backend in backends
+            else 0,
+            format_func=lambda key: JUDGE_BACKENDS[key],
+            horizontal=True,
+        )
+        backend = st.session_state.judge_backend
+        env_var = env.JUDGE_ENV_VARS[backend]
+        env_value = env.judge_key(backend)
+
         st.session_state.judge_key = st.text_input(
-            "Anthropic API key",
-            value=st.session_state.judge_key or env.judge_key(),
+            f"{JUDGE_BACKENDS[backend]} API key",
+            value=st.session_state.judge_key or env_value,
             type="password",
             help="Used only for the enabled LLM metrics.",
+            key=f"judge_key_{backend}",
         )
-        if env.judge_key() and st.session_state.judge_key == env.judge_key():
-            st.caption(f"from `.env` · `ANTHROPIC_API_KEY` = `{env.mask(env.judge_key())}`")
+        if env_value and st.session_state.judge_key == env_value:
+            st.caption(f"from `.env` · `{env_var}` = `{env.mask(env_value)}`")
+        elif not env_value:
+            st.caption(f"Set `{env_var}` in `.env` to pre-fill this.")
+
         columns = st.columns(2)
         with columns[0]:
-            st.session_state.judge_model = st.selectbox(
-                "Judge model",
-                JUDGE_MODELS,
-                index=JUDGE_MODELS.index(st.session_state.judge_model)
-                if st.session_state.judge_model in JUDGE_MODELS
-                else 0,
-            )
+            if backend == "openrouter":
+                st.session_state.judge_model = st.selectbox(
+                    "Judge model",
+                    OPENROUTER_MODELS,
+                    index=OPENROUTER_MODELS.index(st.session_state.judge_model)
+                    if st.session_state.judge_model in OPENROUTER_MODELS
+                    else 0,
+                    accept_new_options=True,
+                    help=(
+                        "Any OpenRouter model slug works — type one in if it is not "
+                        "listed. Reasoning models judge borderline rewordings more "
+                        "reliably; they also cost more and take longer."
+                    ),
+                )
+            else:
+                st.session_state.judge_model = st.selectbox(
+                    "Judge model",
+                    JUDGE_MODELS,
+                    index=JUDGE_MODELS.index(st.session_state.judge_model)
+                    if st.session_state.judge_model in JUDGE_MODELS
+                    else 0,
+                )
         with columns[1]:
+            efforts = ["low", "medium", "high"]
             st.session_state.judge_effort = st.selectbox(
-                "Judge effort", ["low", "medium", "high"],
-                index=["low", "medium", "high"].index(st.session_state.judge_effort),
-                help="Lower effort is cheaper and faster; higher is more careful.",
+                "Reasoning effort",
+                efforts,
+                index=efforts.index(st.session_state.judge_effort),
+                help=(
+                    "How much the judge thinks before answering. Lower is cheaper "
+                    "and faster; higher is more careful on borderline segments."
+                ),
             )
+
+        if backend == "openrouter":
+            st.caption(
+                "OpenRouter reports the real cost of each judge call, so the judge "
+                "spend shown after the run is actual, not estimated."
+            )
+
         if st.button("Test judge connection"):
             try:
-                Judge(
+                create_judge(
+                    backend=backend,
                     api_key=st.session_state.judge_key,
                     model=st.session_state.judge_model,
                     effort=st.session_state.judge_effort,
                 ).check()
-                st.success("Judge reachable.")
+                st.success(f"{st.session_state.judge_model} reachable and returning valid JSON.")
             except JudgeError as exc:
                 st.error(str(exc))
+
+        with st.expander("The judge's system prompt"):
+            st.caption(
+                "Shared by every metric and every backend. Edit it in "
+                "`stt_eval/prompts.py`."
+            )
+            st.code(JUDGE_SYSTEM_PROMPT, language="markdown")
 
     missing = [p for p in selected if requires_key(p) and not keys.get(p)]
     if judge_needed and not st.session_state.judge_key:
@@ -517,7 +576,8 @@ def step_run() -> None:
         if st.button("▶ Run", type="primary", disabled=bool(runner and runner.is_running)):
             judge = None
             if uses_judge():
-                judge = Judge(
+                judge = create_judge(
+                    backend=st.session_state.judge_backend,
                     api_key=st.session_state.judge_key,
                     model=st.session_state.judge_model,
                     effort=st.session_state.judge_effort,
@@ -583,6 +643,20 @@ def step_run() -> None:
         st.rerun()
     elif progress.done:
         st.success(f"Run finished in {progress.elapsed_seconds:.0f}s.")
+        if runner.judge is not None and runner.judge.usage.calls:
+            usage = runner.judge.usage
+            judge_columns = st.columns(3)
+            judge_columns[0].metric("Judge calls", usage.calls)
+            judge_columns[1].metric(
+                "Judge tokens",
+                f"{usage.input_tokens + usage.output_tokens:,}",
+                help=f"{usage.reasoning_tokens:,} of them reasoning tokens"
+                if usage.reasoning_tokens
+                else None,
+            )
+            judge_columns[2].metric(
+                "Judge spend", f"${runner.judge.estimated_cost_usd():.4f}"
+            )
         if st.button("Review results →", type="primary"):
             goto(4)
 
@@ -743,7 +817,9 @@ def step_export() -> None:
         "sample_rate_hz": st.session_state.sample_rate,
         "providers": ", ".join(st.session_state.selected_providers),
         "metrics": ", ".join(metrics),
+        "judge_backend": st.session_state.judge_backend if uses_judge() else "not used",
         "judge_model": st.session_state.judge_model if uses_judge() else "not used",
+        "judge_effort": st.session_state.judge_effort if uses_judge() else "not used",
         "estimated_cost_before_usd": round(estimated_before, 4),
         "actual_cost_usd": round(actual_provider_cost, 4),
     }

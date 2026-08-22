@@ -118,6 +118,70 @@ def main() -> int:
         "api_key" not in Path("stt_eval/store.py").read_text(encoding="utf-8"),
     )
 
+    print("judge backends")
+    from stt_eval.judge import (
+        AnthropicJudge,
+        JudgeError,
+        OpenRouterJudge,
+        _extract_json,
+        create_judge,
+    )
+    from stt_eval.prompts import JUDGE_SYSTEM_PROMPT
+
+    check("anthropic backend builds", isinstance(
+        create_judge(backend="anthropic", api_key="k", model="claude-opus-5"), AnthropicJudge))
+    check("openrouter backend builds", isinstance(
+        create_judge(backend="openrouter", api_key="k", model="deepseek/deepseek-r1"),
+        OpenRouterJudge))
+    try:
+        create_judge(backend="nope", api_key="k", model="m")
+        check("unknown backend rejected", False)
+    except JudgeError:
+        check("unknown backend rejected", True)
+
+    check("plain JSON parses", _extract_json('{"ok": true}')["ok"] is True)
+    check(
+        "fenced JSON parses",
+        _extract_json('```json\n{"ok": true}\n```')["ok"] is True,
+    )
+    check(
+        "JSON after reasoning preamble parses",
+        _extract_json('Let me think about this.\n{"match": false, "reasoning": "x"}')
+        ["match"] is False,
+    )
+    check(
+        "braces inside strings do not break extraction",
+        _extract_json('{"reasoning": "he said {yes}", "match": true}')["match"] is True,
+    )
+    try:
+        _extract_json("not json at all")
+        check("unparseable input raises", False)
+    except JudgeError:
+        check("unparseable input raises", True)
+
+    judge = create_judge(backend="openrouter", api_key="k", model="deepseek/deepseek-r1")
+    body = judge._body(system="s", prompt="p", schema={"type": "object"}, with_schema=True)
+    check("reasoning effort sent", body["reasoning"]["effort"] == "medium")
+    check("cost reporting requested", body["usage"]["include"] is True)
+    check("schema requested when supported", "response_format" in body)
+    fallback = judge._body(system="s", prompt="p", schema={"type": "object"}, with_schema=False)
+    check("schema inlined in prompt on fallback", "response_format" not in fallback)
+    check("fallback prompt carries the schema", "type" in fallback["messages"][1]["content"])
+
+    check(
+        "both backends share one system prompt",
+        judge.system_prompt == JUDGE_SYSTEM_PROMPT
+        and create_judge(backend="anthropic", api_key="k", model="m").system_prompt
+        == JUDGE_SYSTEM_PROMPT,
+    )
+    check(
+        "prompt covers STT-specific failure modes",
+        all(
+            term in JUDGE_SYSTEM_PROMPT.lower()
+            for term in ("homophone", "negation", "hallucinat", "entity", "translation")
+        ),
+    )
+
     print("csv parsing")
     mapping, errors = parse_ground_truth_csv(
         b"id,text\nclip1,hello world\nclip2,\n", "ground_truth.csv"

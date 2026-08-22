@@ -33,7 +33,33 @@ DEFAULT_RETRIES = 2
 DEFAULT_JUDGE_MODEL = "claude-opus-5"
 JUDGE_MODELS = ["claude-opus-5", "claude-sonnet-5", "claude-haiku-4-5"]
 
+JUDGE_BACKENDS = {
+    "anthropic": "Anthropic (Claude, direct)",
+    "openrouter": "OpenRouter (reasoning models)",
+}
+
+# Reasoning-capable models worth judging with. The list is a starting point,
+# not a restriction — the UI lets you type any OpenRouter model slug, since
+# the catalogue changes faster than this file does.
+DEFAULT_OPENROUTER_MODEL = "deepseek/deepseek-r1"
+OPENROUTER_MODELS = [
+    "deepseek/deepseek-r1",
+    "openai/o3-mini",
+    "openai/gpt-5",
+    "anthropic/claude-opus-4.1",
+    "google/gemini-2.5-pro",
+    "qwen/qwq-32b",
+    "x-ai/grok-4",
+]
+
+# Sent as attribution headers so the run shows up meaningfully in an
+# OpenRouter dashboard.
+OPENROUTER_REFERER = "https://github.com/patilllmadhushri-ship-it/Evals"
+OPENROUTER_TITLE = "STT Evaluation Studio"
+
 # Judge pricing (USD per million tokens) for the estimated-cost display.
+# Only used as a fallback: OpenRouter reports the real cost per call, and that
+# figure wins whenever it is present.
 JUDGE_PRICING = {
     "claude-opus-5": (5.00, 25.00),
     "claude-sonnet-5": (3.00, 15.00),

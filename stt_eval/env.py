@@ -25,7 +25,13 @@ PROVIDER_ENV_VARS = {
     "elevenlabs": "ELEVENLABS_API_KEY",
 }
 
-JUDGE_ENV_VAR = "ANTHROPIC_API_KEY"
+#: Judge backend -> environment variable holding its credential.
+JUDGE_ENV_VARS = {
+    "anthropic": "ANTHROPIC_API_KEY",
+    "openrouter": "OPENROUTER_API_KEY",
+}
+
+JUDGE_ENV_VAR = JUDGE_ENV_VARS["anthropic"]  # back-compat alias
 
 
 def parse(text: str) -> dict[str, str]:
@@ -67,8 +73,13 @@ def provider_key(provider: str) -> str:
     return os.environ.get(variable, "") if variable else ""
 
 
-def judge_key() -> str:
-    return os.environ.get(JUDGE_ENV_VAR, "")
+def judge_key(backend: str = "anthropic") -> str:
+    variable = JUDGE_ENV_VARS.get(backend)
+    return os.environ.get(variable, "") if variable else ""
+
+
+def configured_judge_backends() -> list[str]:
+    return [backend for backend in JUDGE_ENV_VARS if judge_key(backend)]
 
 
 def configured_providers() -> list[str]:
