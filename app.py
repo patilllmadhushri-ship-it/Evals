@@ -50,6 +50,7 @@ def _reload_local_modules() -> None:
 _reload_local_modules()
 
 from stt_eval import costs, env, export, report
+from stt_eval import signals as signals_module
 from stt_eval.config import (
     CHARACTER_ORIENTED_LANGUAGES,
     DEFAULT_CONCURRENCY,
@@ -116,6 +117,10 @@ def init_state() -> None:
         "judge_effort": "medium",
         "sample_rate": DEFAULT_SAMPLE_RATE,
         "concurrency": DEFAULT_CONCURRENCY,
+        "judge_concurrency": DEFAULT_CONCURRENCY,
+        "llm_sample_rate": 1.0,
+        "wer_threshold": 0.25,
+        "semantic_threshold": 0.15,
         "inline_ground_truth": {},
         "dataset": None,
         "runner": None,
@@ -635,14 +640,64 @@ def step_configure() -> None:
             st.caption(f"**{badge}** — {spec.question}")
     st.session_state.enabled_metrics = chosen
 
-    st.subheader("Concurrency")
-    st.session_state.concurrency = st.slider(
-        "Simultaneous requests per provider",
-        min_value=1,
-        max_value=MAX_CONCURRENCY,
-        value=st.session_state.concurrency,
-        help="Lower this if a provider starts rate-limiting your key.",
+    st.subheader("Throughput")
+    st.caption(
+        "Transcription and judging run in separate worker pools, so a slow judge "
+        "call never occupies a worker that a provider could be using. Each pool "
+        "has its own limit because each talks to a different service."
     )
+    throughput = st.columns(2)
+    with throughput[0]:
+        st.session_state.concurrency = st.slider(
+            "Provider requests in flight",
+            min_value=1,
+            max_value=MAX_CONCURRENCY,
+            value=st.session_state.concurrency,
+            help="Per provider. Lower this if a provider starts rate-limiting your key.",
+        )
+    with throughput[1]:
+        st.session_state.judge_concurrency = st.slider(
+            "Judge calls in flight",
+            min_value=1,
+            max_value=MAX_CONCURRENCY,
+            value=st.session_state.judge_concurrency,
+            disabled=not any(key in LLM_KEYS for key in chosen),
+            help="Lower this on a rate-limited or free-tier judge endpoint.",
+        )
+
+    if any(key in LLM_KEYS for key in chosen):
+        st.subheader("Sampling")
+        st.caption(
+            "Deterministic metrics run on every clip — they are free once the "
+            "transcript exists. The LLM metrics cost money per clip, and on a "
+            "large dataset most of that confirms what WER already showed. Judging "
+            "a stratified slice instead keeps every confidence band represented "
+            "while cutting the bill."
+        )
+        st.session_state.llm_sample_rate = (
+            st.slider(
+                "Judge this share of clips",
+                min_value=5,
+                max_value=100,
+                step=5,
+                value=int(st.session_state.llm_sample_rate * 100),
+                format="%d%%",
+                help=(
+                    "Stratified by deterministic error rate, so exact matches, "
+                    "near matches, diverging and poor clips are all represented. "
+                    "100% judges everything."
+                ),
+            )
+            / 100.0
+        )
+        pairs = len(dataset.clips) * len(selected)
+        judged = max(1, round(pairs * st.session_state.llm_sample_rate))
+        if st.session_state.llm_sample_rate < 1.0:
+            st.caption(
+                f"≈{judged} of {pairs} pairs judged. The leaderboard's LLM columns "
+                "then describe the sample, not the whole dataset — WER and CER still "
+                "cover everything."
+            )
 
     st.divider()
     st.subheader("Estimated cost before running")
@@ -880,6 +935,8 @@ def step_run() -> None:
                     api_keys=st.session_state.api_keys,
                     enabled_metrics=metrics,
                     per_provider_concurrency=st.session_state.concurrency,
+                    judge_concurrency=st.session_state.judge_concurrency,
+                    llm_sample_rate=st.session_state.llm_sample_rate,
                     max_retries=DEFAULT_RETRIES,
                 ),
                 dataset=dataset,
@@ -908,12 +965,24 @@ def step_run() -> None:
     if progress.fatal_error:
         st.error(progress.fatal_error)
 
-    st.progress(progress.fraction, text=f"{progress.completed + progress.skipped}/{progress.total} pairs")
-    stats = st.columns(4)
-    stats[0].metric("Completed", progress.completed)
-    stats[1].metric("Reused", progress.skipped)
-    stats[2].metric("Failed", progress.failed)
-    stats[3].metric("Elapsed", f"{progress.elapsed_seconds:.0f}s")
+    stage_label = {
+        "transcribing": "Stage 1 · transcribing",
+        "scoring": "Stage 2 · judging",
+        "done": "Finished",
+    }.get(progress.stage, progress.stage)
+    st.progress(
+        progress.fraction,
+        text=f"{stage_label} — {progress.transcribed + progress.skipped}/{progress.total} transcribed"
+        + (f", {progress.scored}/{progress.to_score} judged" if progress.to_score else ""),
+    )
+    stats = st.columns(5)
+    stats[0].metric("Transcribed", progress.transcribed)
+    stats[1].metric("Judged", progress.scored)
+    stats[2].metric("Reused", progress.skipped)
+    stats[3].metric("Failed", progress.failed)
+    stats[4].metric("Elapsed", f"{progress.elapsed_seconds:.0f}s")
+    if progress.sample_summary:
+        st.caption(f"Judge sample — {progress.sample_summary}")
 
     if progress.current:
         st.caption("In flight: " + ", ".join(sorted(progress.current)[:8]))
@@ -967,6 +1036,48 @@ def step_review() -> None:
     summaries = report.summarize(results, enabled_metrics=metrics)
     best = report.winners(summaries, metric_keys=metrics)
 
+    # --- Signals ----------------------------------------------------------
+    st.subheader("Signals")
+    threshold_columns = st.columns([1, 1, 2])
+    with threshold_columns[0]:
+        st.session_state.wer_threshold = st.number_input(
+            "WER threshold", min_value=0.0, max_value=1.0, step=0.05,
+            value=float(st.session_state.wer_threshold),
+        )
+    with threshold_columns[1]:
+        st.session_state.semantic_threshold = st.number_input(
+            "Semantic error threshold", min_value=0.0, max_value=1.0, step=0.05,
+            value=float(st.session_state.semantic_threshold),
+        )
+    with threshold_columns[2]:
+        judged, total_scored = signals_module.coverage(results)
+        st.caption(
+            f"Meaning-aware metrics cover {judged} of {total_scored} transcribed "
+            "pairs. WER spikes point at acoustic or model degradation; a semantic "
+            "error rate that rises *without* a matching WER rise points at "
+            "meaning-critical failures that WER cannot see."
+        )
+
+    thresholds = signals_module.Thresholds(
+        wer=st.session_state.wer_threshold,
+        semantic_error=st.session_state.semantic_threshold,
+    )
+    found = signals_module.evaluate(results, summaries, thresholds=thresholds)
+    if not found:
+        st.success("No threshold breaches and no divergence between WER and meaning.")
+    for signal in found:
+        render = {"critical": st.error, "warning": st.warning, "info": st.info}[signal.severity]
+        render(f"**{signal.title}**  \n{signal.detail}")
+        if signal.pairs:
+            st.caption(
+                "Clips: "
+                + ", ".join(
+                    f"`{clip_id}`/{provider_label(provider)}" for clip_id, provider in signal.pairs[:12]
+                )
+                + (f" and {len(signal.pairs) - 12} more" if len(signal.pairs) > 12 else "")
+            )
+
+    st.divider()
     st.subheader("Leaderboard")
     sort_metric = st.selectbox(
         "Rank by",

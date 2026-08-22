@@ -41,6 +41,7 @@ CREATE TABLE IF NOT EXISTS results (
     latency_seconds   REAL,
     duration_seconds  REAL NOT NULL DEFAULT 0,
     language          TEXT NOT NULL DEFAULT '',
+    sampled           INTEGER NOT NULL DEFAULT 1,
     metrics_json      TEXT NOT NULL DEFAULT '{}',
     updated_at        REAL NOT NULL,
     PRIMARY KEY (run_id, clip_id, provider)
@@ -63,6 +64,9 @@ class StoredResult:
     duration_seconds: float = 0.0
     #: The language this clip was actually transcribed in.
     language: str = ""
+    #: False when the pair was deliberately left out of the LLM-metric sample,
+    #: which is different from having been judged and failed.
+    sampled: bool = True
     metrics: dict = field(default_factory=dict)
     updated_at: float = 0.0
 
@@ -108,7 +112,10 @@ class ResultStore:
         existing = {
             row["name"] for row in self._connection.execute("PRAGMA table_info(results)")
         }
-        for column, definition in (("language", "TEXT NOT NULL DEFAULT ''"),):
+        for column, definition in (
+            ("language", "TEXT NOT NULL DEFAULT ''"),
+            ("sampled", "INTEGER NOT NULL DEFAULT 1"),
+        ):
             if column not in existing:
                 self._connection.execute(
                     f"ALTER TABLE results ADD COLUMN {column} {definition}"
@@ -168,9 +175,9 @@ class ResultStore:
                 """
                 INSERT INTO results (
                     run_id, clip_id, provider, status, ground_truth, prediction,
-                    error, latency_seconds, duration_seconds, language,
+                    error, latency_seconds, duration_seconds, language, sampled,
                     metrics_json, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(run_id, clip_id, provider) DO UPDATE SET
                     status = excluded.status,
                     ground_truth = excluded.ground_truth,
@@ -179,6 +186,7 @@ class ResultStore:
                     latency_seconds = excluded.latency_seconds,
                     duration_seconds = excluded.duration_seconds,
                     language = excluded.language,
+                    sampled = excluded.sampled,
                     metrics_json = excluded.metrics_json,
                     updated_at = excluded.updated_at
                 """,
@@ -193,6 +201,7 @@ class ResultStore:
                     payload["latency_seconds"],
                     payload["duration_seconds"],
                     payload["language"],
+                    1 if payload["sampled"] else 0,
                     json.dumps(payload["metrics"]),
                     payload["updated_at"],
                 ),
@@ -207,12 +216,23 @@ class ResultStore:
             ).fetchall()
         return [self._row_to_result(row) for row in rows]
 
-    def completed_keys(self, run_id: str, *, required_metrics: list[str]) -> set[tuple[str, str]]:
-        """Pairs already fully scored for this metric set — these are skipped.
+    def completed_keys(
+        self,
+        run_id: str,
+        *,
+        required_metrics: list[str],
+        llm_metrics: list[str] | None = None,
+    ) -> set[tuple[str, str]]:
+        """Pairs that need no further transcription — these are skipped.
 
-        A pair counts as complete only if every currently-enabled metric has a
-        value recorded, so enabling a new metric re-scores just that metric's
-        missing work rather than nothing at all.
+        A pair counts as complete once it has a transcript and every
+        `required_metrics` value, so enabling a new metric re-scores just that
+        metric's missing work rather than nothing at all.
+
+        `llm_metrics` are judged in a later stage on a sampled subset, so they
+        deliberately do not gate this: a pair left out of the sample is complete
+        as far as transcription is concerned, and re-running must not
+        re-transcribe it just because it was never judged.
         """
         complete: set[tuple[str, str]] = set()
         for result in self.load(run_id):
@@ -250,6 +270,7 @@ class ResultStore:
             latency_seconds=row["latency_seconds"],
             duration_seconds=row["duration_seconds"],
             language=(row["language"] if "language" in row.keys() else "") or "",
+            sampled=bool(row["sampled"]) if "sampled" in row.keys() else True,
             metrics=json.loads(row["metrics_json"] or "{}"),
             updated_at=row["updated_at"],
         )

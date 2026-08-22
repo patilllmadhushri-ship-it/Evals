@@ -318,6 +318,68 @@ def main() -> int:
         check("completed pairs reused, not recomputed", second_progress.skipped == 3)
         check("no new work done", second_progress.completed == 0)
 
+        print("sampling")
+        from stt_eval import sampling
+
+        pool = [((f"clip{index}", "mock"), index / 40.0) for index in range(40)]
+        full = sampling.plan(pool, rate=1.0)
+        check("rate 1.0 judges everything", full.total_selected == 40)
+
+        tenth = sampling.plan(pool, rate=0.10, seed=7)
+        check("sampling reduces the judged set", 4 <= tenth.total_selected <= 12)
+        check(
+            "every populated band keeps representation",
+            all(
+                sampled >= 1
+                for _, (sampled, total) in tenth.per_band.items()
+                if total
+            ),
+        )
+        check(
+            "sampling is deterministic for a given seed",
+            sampling.plan(pool, rate=0.10, seed=7).selected == tenth.selected,
+        )
+        check("exact matches land in their own band", sampling.band_for(0.0) == "exact match")
+        check("bad clips land in the poor band", sampling.band_for(0.9) == "poor")
+
+        print("signals")
+        from stt_eval import signals as sig
+        from stt_eval.store import StoredResult as SR
+
+        low_wer_broken = SR(
+            run_id="x", clip_id="c1", provider="mock", status="ok",
+            metrics={"wer": {"value": 0.05}, "semantic_match": {"value": 0.0}},
+        )
+        high_wer_fine = SR(
+            run_id="x", clip_id="c2", provider="mock", status="ok",
+            metrics={"wer": {"value": 0.60}, "semantic_match": {"value": 1.0}},
+        )
+        broken, wording = sig.divergences(
+            [low_wer_broken, high_wer_fine], thresholds=sig.Thresholds()
+        )
+        check("low WER with broken meaning is flagged", [r.clip_id for r in broken] == ["c1"])
+        check("high WER with intact meaning is flagged", [r.clip_id for r in wording] == ["c2"])
+
+        found = sig.evaluate(
+            [low_wer_broken, high_wer_fine],
+            report.summarize([low_wer_broken, high_wer_fine], enabled_metrics=["wer"]),
+            thresholds=sig.Thresholds(),
+        )
+        check("meaning-critical failure is critical severity", found[0].severity == "critical")
+        check(
+            "a clean run raises nothing",
+            sig.evaluate(
+                [SR(run_id="x", clip_id="c", provider="mock", status="ok",
+                    metrics={"wer": {"value": 0.01}, "semantic_match": {"value": 1.0}})],
+                report.summarize(
+                    [SR(run_id="x", clip_id="c", provider="mock", status="ok",
+                        metrics={"wer": {"value": 0.01}})],
+                    enabled_metrics=["wer"],
+                ),
+                thresholds=sig.Thresholds(),
+            ) == [],
+        )
+
         print("aggregation + export")
         summaries = report.summarize(results, enabled_metrics=["wer", "cer"])
         check("summary per provider", set(summaries) == {"mock"})
