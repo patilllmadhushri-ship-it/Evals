@@ -160,12 +160,15 @@ class Runner:
                 self.progress.current = []
 
     def _transcribe_with_retries(self, provider: STTProvider, clip: Clip) -> tuple[str, float]:
+        # A clip recorded in a specific language overrides the run's language,
+        # so a mixed-language dataset is never sent as one language.
+        language = clip.language_for(self.config.language)
         last_error: Exception | None = None
         for attempt in range(self.config.max_retries + 1):
             if self._cancel.is_set():
                 raise ProviderError("Run cancelled.", retryable=False)
             try:
-                result = provider.transcribe(clip.audio.wav_bytes, self.config.language)
+                result = provider.transcribe(clip.audio.wav_bytes, language)
                 return result.text, result.latency_seconds
             except ProviderError as exc:
                 last_error = exc
@@ -206,6 +209,7 @@ class Runner:
                             ground_truth=clip.ground_truth,
                             error=str(exc),
                             duration_seconds=clip.duration_seconds,
+                            language=clip.language_for(self.config.language),
                         )
                     )
                     with self._lock:
@@ -220,7 +224,9 @@ class Runner:
                     prediction=prediction,
                     enabled_metrics=self.config.enabled_metrics,
                     judge=self.judge if any(k in LLM_KEYS for k in self.config.enabled_metrics) else None,
-                    language=self.config.language,
+                    # The judge is told the clip's own language, so it applies
+                    # the right transliteration and code-switching rules.
+                    language=clip.language_for(self.config.language),
                 )
 
                 self.store.save(
@@ -233,6 +239,7 @@ class Runner:
                         prediction=prediction,
                         latency_seconds=latency,
                         duration_seconds=clip.duration_seconds,
+                        language=clip.language_for(self.config.language),
                         metrics={
                             key: {
                                 "value": metric.value,

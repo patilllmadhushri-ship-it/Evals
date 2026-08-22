@@ -72,7 +72,11 @@ def main() -> int:
 
     print("language / provider matrix")
     from stt_eval.config import LANGUAGES
-    from stt_eval.providers import PROVIDER_CLASSES, providers_for_language
+    from stt_eval.providers import (
+        PROVIDER_CLASSES,
+        providers_for_language,
+        supports_language,
+    )
 
     codes = [lang.code for lang in LANGUAGES]
     check("no duplicate language codes", len(codes) == len(set(codes)))
@@ -238,6 +242,45 @@ def main() -> int:
     check(
         "id collision between sources is caught",
         any("duplicate clip id" in message for message in collision.errors),
+    )
+
+    print("per-clip language")
+    tagged = build_dataset(
+        uploads + [("rec1.wav", make_wav(0.8))],
+        {**GROUND_TRUTH, "rec1": "recorded in hindi"},
+        languages={"rec1": "hi-IN"},
+    )
+    rec = tagged.by_id("rec1")
+    check("recorded clip carries its language", rec.language == "hi-IN")
+    check("tagged clip overrides the run language", rec.language_for("en-IN") == "hi-IN")
+    check(
+        "untagged clips fall back to the run language",
+        tagged.by_id("clip1").language_for("en-IN") == "en-IN",
+    )
+    check(
+        "languages in use are reported",
+        tagged.languages_in_use("en-IN") == {"en-IN", "hi-IN"},
+    )
+    check("one tagged language is not multilingual", not tagged.is_multilingual)
+    two_languages = build_dataset(
+        uploads + [("rec1.wav", make_wav(0.8)), ("rec2.wav", make_wav(0.8))],
+        {**GROUND_TRUTH, "rec1": "hindi clip", "rec2": "tamil clip"},
+        languages={"rec1": "hi-IN", "rec2": "ta-IN"},
+    )
+    check("two tagged languages is multilingual", two_languages.is_multilingual)
+    check(
+        "provider filter respects every language in use",
+        # Sarvam covers both en-IN and hi-IN; Google covers both; a Japanese
+        # clip in the mix would exclude Sarvam.
+        all(supports_language("sarvam", code) for code in tagged.languages_in_use("en-IN"))
+        and not all(
+            supports_language("sarvam", code)
+            for code in build_dataset(
+                uploads + [("rec1.wav", make_wav(0.8))],
+                {**GROUND_TRUTH, "rec1": "japanese clip"},
+                languages={"rec1": "ja-JP"},
+            ).languages_in_use("en-IN")
+        ),
     )
 
     unmatched = build_dataset([("orphan.wav", make_wav(0.5))], GROUND_TRUTH)

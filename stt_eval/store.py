@@ -40,6 +40,7 @@ CREATE TABLE IF NOT EXISTS results (
     error             TEXT,
     latency_seconds   REAL,
     duration_seconds  REAL NOT NULL DEFAULT 0,
+    language          TEXT NOT NULL DEFAULT '',
     metrics_json      TEXT NOT NULL DEFAULT '{}',
     updated_at        REAL NOT NULL,
     PRIMARY KEY (run_id, clip_id, provider)
@@ -60,6 +61,8 @@ class StoredResult:
     error: str | None = None
     latency_seconds: float | None = None
     duration_seconds: float = 0.0
+    #: The language this clip was actually transcribed in.
+    language: str = ""
     metrics: dict = field(default_factory=dict)
     updated_at: float = 0.0
 
@@ -92,7 +95,24 @@ class ResultStore:
         with self._lock:
             self._connection.execute("PRAGMA journal_mode=WAL")
             self._connection.executescript(_SCHEMA)
+            self._migrate()
             self._connection.commit()
+
+    def _migrate(self) -> None:
+        """Add columns introduced after a database was first created.
+
+        `CREATE TABLE IF NOT EXISTS` leaves an existing table untouched, so a
+        store written by an older version keeps its old shape and every insert
+        naming a new column fails. Adding the column back is cheap and safe.
+        """
+        existing = {
+            row["name"] for row in self._connection.execute("PRAGMA table_info(results)")
+        }
+        for column, definition in (("language", "TEXT NOT NULL DEFAULT ''"),):
+            if column not in existing:
+                self._connection.execute(
+                    f"ALTER TABLE results ADD COLUMN {column} {definition}"
+                )
 
     # -- runs ---------------------------------------------------------------
 
@@ -148,8 +168,9 @@ class ResultStore:
                 """
                 INSERT INTO results (
                     run_id, clip_id, provider, status, ground_truth, prediction,
-                    error, latency_seconds, duration_seconds, metrics_json, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    error, latency_seconds, duration_seconds, language,
+                    metrics_json, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(run_id, clip_id, provider) DO UPDATE SET
                     status = excluded.status,
                     ground_truth = excluded.ground_truth,
@@ -157,6 +178,7 @@ class ResultStore:
                     error = excluded.error,
                     latency_seconds = excluded.latency_seconds,
                     duration_seconds = excluded.duration_seconds,
+                    language = excluded.language,
                     metrics_json = excluded.metrics_json,
                     updated_at = excluded.updated_at
                 """,
@@ -170,6 +192,7 @@ class ResultStore:
                     payload["error"],
                     payload["latency_seconds"],
                     payload["duration_seconds"],
+                    payload["language"],
                     json.dumps(payload["metrics"]),
                     payload["updated_at"],
                 ),
@@ -226,6 +249,7 @@ class ResultStore:
             error=row["error"],
             latency_seconds=row["latency_seconds"],
             duration_seconds=row["duration_seconds"],
+            language=(row["language"] if "language" in row.keys() else "") or "",
             metrics=json.loads(row["metrics_json"] or "{}"),
             updated_at=row["updated_at"],
         )

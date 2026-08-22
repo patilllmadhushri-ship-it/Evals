@@ -125,6 +125,7 @@ def init_state() -> None:
         "mic_preview": {},
         "mic_provider": "",
         "input_source": "🎤 Microphone",
+        "clip_languages": {},
         "ground_truth_map": {},
         "ground_truth_source": "ground_truth.csv",
     }
@@ -376,6 +377,12 @@ def step_upload() -> None:
                     st.session_state.recorded_audio = recorded + [
                         (f"{clean_id}.wav", recording.getvalue())
                     ]
+                    # Tag the clip with the language it was recorded in, so a
+                    # mixed-language dataset transcribes each clip correctly.
+                    st.session_state.clip_languages = {
+                        **(st.session_state.clip_languages or {}),
+                        clean_id: st.session_state.language,
+                    }
                     # Bump the widget keys so the recorder resets for the next clip.
                     st.session_state.mic_round += 1
                     st.session_state.mic_preview = {}
@@ -390,14 +397,26 @@ def step_upload() -> None:
 
         if recorded:
             st.markdown("**Recorded clips**")
+            clip_languages = st.session_state.clip_languages or {}
             for index, (name, raw) in enumerate(list(recorded)):
+                recorded_id = clip_id_for(name)
                 row = st.columns([2, 4, 1])
-                row[0].markdown(f"`{clip_id_for(name)}`")
+                tagged = clip_languages.get(recorded_id)
+                row[0].markdown(
+                    f"`{recorded_id}`"
+                    + (f"<br><small>{labels.get(tagged, tagged)}</small>" if tagged else ""),
+                    unsafe_allow_html=True,
+                )
                 row[1].audio(raw)
                 if row[2].button("Remove", key=f"drop_rec_{index}"):
                     st.session_state.recorded_audio = [
                         item for position, item in enumerate(recorded) if position != index
                     ]
+                    st.session_state.clip_languages = {
+                        key: value
+                        for key, value in clip_languages.items()
+                        if key != recorded_id
+                    }
                     st.rerun()
 
     # Uploads and recordings feed one dataset; nothing downstream knows the difference.
@@ -486,6 +505,7 @@ def step_upload() -> None:
                 ground_truth,
                 ground_truth_source=st.session_state.ground_truth_source,
                 sample_rate=st.session_state.sample_rate,
+                languages=st.session_state.clip_languages,
             )
         st.session_state.dataset = dataset
 
@@ -547,8 +567,23 @@ def step_configure() -> None:
     )
     language = st.session_state.language
 
-    available = providers_for_language(language)
+    # Clips recorded with their own language override the run's, so a provider
+    # is only usable if it supports every language actually in the dataset.
+    languages_in_use = dataset.languages_in_use(language)
+    available = [
+        key
+        for key in PROVIDER_CLASSES
+        if all(supports_language(key, code) for code in languages_in_use)
+    ]
     unavailable = [key for key in PROVIDER_CLASSES if key not in available]
+
+    if len(languages_in_use) > 1:
+        st.info(
+            "This dataset is multilingual — "
+            + ", ".join(sorted(labels.get(code, code) for code in languages_in_use))
+            + ". Each clip is transcribed in its own language, and only providers "
+            "that support all of them are listed."
+        )
 
     if language in CHARACTER_ORIENTED_LANGUAGES:
         st.info(

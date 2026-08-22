@@ -121,6 +121,7 @@ def per_clip_rows(
         row: dict = {
             "id": result.clip_id,
             "provider": result.provider,
+            "language": result.language,
             "status": result.status,
             "ground_truth": result.ground_truth,
             "prediction": result.prediction,

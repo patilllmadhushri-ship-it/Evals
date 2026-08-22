@@ -23,10 +23,17 @@ class Clip:
     filename: str
     ground_truth: str
     audio: NormalizedAudio
+    #: Language of this clip specifically. `None` means "use the run's
+    #: language" — set per clip when recording, so a Hindi clip and an English
+    #: clip can live in one dataset without either being sent as the other.
+    language: str | None = None
 
     @property
     def duration_seconds(self) -> float:
         return self.audio.duration_seconds
+
+    def language_for(self, run_language: str) -> str:
+        return self.language or run_language
 
 
 @dataclass
@@ -51,6 +58,14 @@ class Dataset:
 
     def by_id(self, clip_id: str) -> Clip | None:
         return next((clip for clip in self.clips if clip.clip_id == clip_id), None)
+
+    def languages_in_use(self, run_language: str) -> set[str]:
+        """Every language this dataset will actually be transcribed in."""
+        return {clip.language_for(run_language) for clip in self.clips}
+
+    @property
+    def is_multilingual(self) -> bool:
+        return len({clip.language for clip in self.clips if clip.language}) > 1
 
 
 def clip_id_for(filename: str) -> str:
@@ -104,6 +119,7 @@ def build_dataset(
     *,
     ground_truth_source: str = "ground_truth.csv",
     sample_rate: int = DEFAULT_SAMPLE_RATE,
+    languages: dict[str, str] | None = None,
 ) -> Dataset:
     """Decode every upload, match it to its ground truth, and report both directions.
 
@@ -148,7 +164,13 @@ def build_dataset(
             )
 
         dataset.clips.append(
-            Clip(clip_id=clip_id, filename=filename, ground_truth=expected, audio=audio)
+            Clip(
+                clip_id=clip_id,
+                filename=filename,
+                ground_truth=expected,
+                audio=audio,
+                language=(languages or {}).get(clip_id),
+            )
         )
 
     for row_id in ground_truth:
