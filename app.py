@@ -991,13 +991,28 @@ def step_credentials() -> None:
             )
             st.code(JUDGE_SYSTEM_PROMPT, language="markdown")
 
-    missing = [p for p in selected if requires_key(p) and not keys.get(p)]
-    if judge_needed and not st.session_state.judge_key:
-        missing.append("LLM judge")
-    if missing:
-        st.info("Still needed: " + ", ".join(missing))
+    missing_providers = [p for p in selected if requires_key(p) and not keys.get(p)]
+    judge_missing = judge_needed and not st.session_state.judge_key
 
-    if st.button("Continue to run →", type="primary", disabled=bool(missing)):
+    if missing_providers:
+        st.warning(
+            "Still needed: "
+            + ", ".join(provider_label(p) for p in missing_providers)
+            + ". These are selected in step 2 but have no key — either paste one "
+            "above, or drop them from this run."
+        )
+        if st.button(
+            f"Drop {', '.join(provider_label(p) for p in missing_providers)} from this run"
+        ):
+            st.session_state.selected_providers = [
+                p for p in selected if p not in missing_providers
+            ]
+            st.rerun()
+    if judge_missing:
+        st.info("Still needed: a key for the LLM judge, or turn the LLM metrics off in step 2.")
+
+    blocked = bool(missing_providers or judge_missing)
+    if st.button("Continue to run →", type="primary", disabled=blocked):
         goto(3)
 
 
