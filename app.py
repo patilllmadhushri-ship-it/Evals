@@ -323,17 +323,21 @@ def step_upload() -> None:
                 )
 
             def _transcribe_all(raw: bytes) -> dict:
-                """Run every chosen provider over the same audio, concurrently."""
-                clip_audio = normalize(
-                    raw, "recording.wav", sample_rate=st.session_state.sample_rate
-                )
+                """Run every chosen provider over the same audio, concurrently.
+
+                Everything the worker threads need is read from session state
+                *here*, on the main thread, and closed over as plain values.
+                `st.session_state` is only bound on the script-run thread, so
+                touching it inside a pool worker raises AttributeError.
+                """
+                sample_rate = st.session_state.sample_rate
+                language = st.session_state.language
+                clip_audio = normalize(raw, "recording.wav", sample_rate=sample_rate)
 
                 def one(provider_key: str) -> tuple[str, dict]:
                     try:
                         client = build(provider_key, env.provider_key(provider_key))
-                        outcome = client.transcribe(
-                            clip_audio.wav_bytes, st.session_state.language
-                        )
+                        outcome = client.transcribe(clip_audio.wav_bytes, language)
                         return provider_key, {
                             "text": outcome.text,
                             "latency": outcome.latency_seconds,

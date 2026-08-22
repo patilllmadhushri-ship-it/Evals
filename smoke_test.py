@@ -8,6 +8,7 @@ No API keys and no network access are required — the LLM metrics are skipped.
 
 from __future__ import annotations
 
+import ast
 import io
 import math
 import sys
@@ -185,6 +186,30 @@ def main() -> int:
             for term in ("homophone", "negation", "hallucinat", "entity", "translation")
         ),
     )
+
+    print("threading discipline")
+    # st.session_state is bound to Streamlit's script-run thread. Reading it
+    # from a pool worker raises AttributeError at runtime, which no import or
+    # render check catches — so assert statically that worker bodies only use
+    # values hoisted on the main thread.
+    app_source = Path("app.py").read_text(encoding="utf-8")
+    app_tree = ast.parse(app_source)
+    offenders: list[str] = []
+    for node in ast.walk(app_tree):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        if node.name not in {"one", "_worker", "_task"}:
+            continue
+        for inner in ast.walk(node):
+            if (
+                isinstance(inner, ast.Attribute)
+                and isinstance(inner.value, ast.Attribute)
+                and inner.value.attr == "session_state"
+            ):
+                offenders.append(f"{node.name}() line {inner.lineno}")
+    check("no session_state access inside thread workers", not offenders)
+    if offenders:
+        print("      offenders:", offenders)
 
     print("csv parsing")
     mapping, errors = parse_ground_truth_csv(
