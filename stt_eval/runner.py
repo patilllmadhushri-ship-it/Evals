@@ -298,6 +298,30 @@ class Runner:
                     provider._ground_truth_hint = clip.ground_truth  # noqa: SLF001
 
                 language = clip.language_for(self.config.language)
+
+                # A per-clip language can make a provider invalid for one clip
+                # even though it was valid for the run's language. Say so
+                # instead of spending a request to be told by the API.
+                if not provider.supports(language):
+                    self.store.save(
+                        StoredResult(
+                            run_id=self.config.run_id,
+                            clip_id=clip.clip_id,
+                            provider=provider_key,
+                            status="failed",
+                            ground_truth=clip.ground_truth,
+                            error=(
+                                f"{provider_key} does not support {language}, which is "
+                                f"the language set for this clip."
+                            ),
+                            duration_seconds=clip.duration_seconds,
+                            language=language,
+                        )
+                    )
+                    with self._lock:
+                        self.progress.failed += 1
+                        self.progress.transcribed += 1
+                    return
                 try:
                     prediction, latency = self._transcribe_with_retries(provider, clip)
                 except Exception as exc:  # noqa: BLE001 - isolated to this pair
