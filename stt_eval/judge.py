@@ -137,10 +137,19 @@ class Judge:
             ) / 1_000_000
 
     def check(self) -> None:
-        """Cheap round-trip so a bad key or model fails at setup, not mid-run."""
+        """Cheap round-trip so a bad key or model fails at setup, not mid-run.
+
+        The prompt deliberately contains no literal JSON example. Showing one
+        alongside a schema makes some models nest the example inside the
+        schema's own field — `{"ok": {"ok": true}}` — which is a failure of the
+        prompt, not of the model or the key.
+        """
         payload = self.ask_json(
-            system="You validate connectivity. Reply with the JSON object only.",
-            prompt='Reply with exactly {"ok": true}.',
+            system=(
+                "You are validating that structured output works. Set the field "
+                "to true. Return only the object described by the schema."
+            ),
+            prompt="Confirm you can respond in the required format by setting ok to true.",
             schema={
                 "type": "object",
                 "properties": {"ok": {"type": "boolean"}},
