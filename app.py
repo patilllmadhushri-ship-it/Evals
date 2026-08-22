@@ -53,6 +53,7 @@ _reload_local_modules()
 
 from stt_eval import costs, env, export, report
 from stt_eval import signals as signals_module
+from stt_eval import streaming
 from stt_eval.config import (
     CHARACTER_ORIENTED_LANGUAGES,
     DEFAULT_CONCURRENCY,
@@ -123,6 +124,7 @@ def init_state() -> None:
         "llm_sample_rate": 1.0,
         "wer_threshold": 0.25,
         "semantic_threshold": 0.15,
+        "probe_result": None,
         "inline_ground_truth": {},
         "dataset": None,
         "runner": None,
@@ -1247,6 +1249,125 @@ def step_review() -> None:
                 st.markdown(
                     f"- `{failure.clip_id}` · **{provider_label(failure.provider)}** — {failure.error}"
                 )
+
+    st.divider()
+    with st.expander("⏱️ Streaming latency probe — partial emission, finals, RTF"):
+        st.caption(
+            "A batch request only tells you how long the whole call took. The "
+            "metrics that decide whether an engine works in a voice agent — how "
+            "fast partials appear while someone is still talking, and how quickly "
+            "a phrase is locked in — only exist over a streaming connection. This "
+            "replays a clip over the provider's WebSocket at real-time pace and "
+            "timestamps every result as it arrives, so the numbers are what a live "
+            "speaker would have experienced."
+        )
+        dataset_for_probe = st.session_state.dataset
+        streamable = [
+            key
+            for key in st.session_state.selected_providers
+            if key in streaming.STREAMING_PROVIDERS and env.provider_key(key)
+        ]
+        if not dataset_for_probe or not dataset_for_probe.clips:
+            st.info("Load a dataset in step 1 to probe a clip.")
+        elif not streamable:
+            st.info(
+                "No streaming-capable provider selected. Only "
+                + ", ".join(sorted(streaming.STREAMING_PROVIDERS))
+                + " has a streaming endpoint wired up here; the others expose batch "
+                "HTTP only, so partial and finals latency cannot be measured for them."
+            )
+        else:
+            probe_columns = st.columns([2, 2, 1])
+            with probe_columns[0]:
+                probe_clip = st.selectbox(
+                    "Clip", [clip.clip_id for clip in dataset_for_probe.clips], key="probe_clip"
+                )
+            with probe_columns[1]:
+                probe_provider = st.selectbox(
+                    "Provider", streamable, format_func=provider_label, key="probe_provider"
+                )
+            with probe_columns[2]:
+                probe_pacing = st.selectbox(
+                    "Pacing", ["realtime", "fast"], key="probe_pacing",
+                    help="Real-time pacing measures latency as a live speaker would "
+                    "see it. Fast sends everything at once and measures RTF instead.",
+                )
+
+            if st.button("Measure", type="primary"):
+                clip = dataset_for_probe.by_id(probe_clip)
+                with st.spinner(
+                    f"Streaming {clip.duration_seconds:.1f}s of audio to "
+                    f"{provider_label(probe_provider)}…"
+                ):
+                    st.session_state.probe_result = streaming.measure(
+                        provider=probe_provider,
+                        api_key=env.provider_key(probe_provider),
+                        wav_bytes=clip.audio.wav_bytes,
+                        language=clip.language_for(st.session_state.language),
+                        pacing=probe_pacing,
+                    )
+                st.rerun()
+
+            probe = st.session_state.probe_result
+            if probe is not None:
+                if not probe.ok:
+                    st.error(probe.error)
+                elif not probe.events:
+                    st.warning(
+                        "The engine returned no transcript events for this clip, so "
+                        "there is nothing to time. Usually that means silence, noise "
+                        "or a language mismatch rather than a latency problem."
+                    )
+                else:
+                    figures = st.columns(4)
+                    figures[0].metric(
+                        "Time to first partial",
+                        f"{probe.time_to_first_partial:.2f}s"
+                        if probe.time_to_first_partial is not None
+                        else "—",
+                        help="How long before the engine says anything at all.",
+                    )
+                    figures[1].metric(
+                        "Partial emission",
+                        f"{probe.partial_emission_latency:.2f}s"
+                        if probe.partial_emission_latency is not None
+                        else "—",
+                        help="Median delay of incremental updates behind the speech they carry.",
+                    )
+                    figures[2].metric(
+                        "Finals latency",
+                        f"{probe.finals_latency:.2f}s"
+                        if probe.finals_latency is not None
+                        else "—",
+                        help="Median delay between a phrase ending and being locked in — "
+                        "this is what gates a voice agent's turn-taking.",
+                    )
+                    figures[3].metric(
+                        "RTF",
+                        f"{probe.rtf:.2f}" if probe.rtf is not None else "n/a",
+                        help="Processing time over audio duration. Only measured under "
+                        "fast pacing — under real-time pacing the clock is the pacing.",
+                    )
+                    st.caption(
+                        f"{len(probe.partials)} partial(s), {len(probe.finals)} final(s) "
+                        f"over {probe.audio_seconds:.1f}s of audio."
+                    )
+                    st.dataframe(
+                        pd.DataFrame(
+                            [
+                                {
+                                    "arrived at": round(event.arrival_offset, 2),
+                                    "covers audio": f"{event.audio_start:.1f}–{event.audio_end:.1f}s",
+                                    "behind by": round(event.latency, 2),
+                                    "final": event.is_final,
+                                    "text": event.text,
+                                }
+                                for event in probe.events
+                            ]
+                        ),
+                        width="stretch",
+                        hide_index=True,
+                    )
 
     st.divider()
     st.subheader("Per-clip drill-down")

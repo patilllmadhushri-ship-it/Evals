@@ -24,6 +24,9 @@ class ProviderSummary:
     metric_errors: dict[str, int] = field(default_factory=dict)
     latency: dict[str, float | None] = field(default_factory=dict)
     estimated_cost_usd: float = 0.0
+    #: Real-time factor: processing time over audio duration, pooled. Below 1.0
+    #: means the provider consumes speech faster than it arrives.
+    rtf: float | None = None
 
     @property
     def rate_usd_per_minute(self) -> float:
@@ -81,8 +84,28 @@ def summarize(
     for provider, summary in summaries.items():
         summary.latency = percentiles(latencies.get(provider, []))
         summary.estimated_cost_usd = summary.audio_minutes * summary.rate_usd_per_minute
+        summary.rtf = _pooled_rtf(results, provider)
 
     return summaries
+
+
+def _pooled_rtf(results: list[StoredResult], provider: str) -> float | None:
+    """Processing time over audio duration, pooled across the provider's clips.
+
+    Pooled rather than averaged per clip for the same reason as WER: a
+    half-second clip should not weigh as much as a two-minute one. Below 1.0
+    means the provider is faster than real time.
+    """
+    total_latency = 0.0
+    total_audio = 0.0
+    for result in results:
+        if result.provider != provider or not result.ok:
+            continue
+        if result.latency_seconds is None or not result.duration_seconds:
+            continue
+        total_latency += result.latency_seconds
+        total_audio += result.duration_seconds
+    return (total_latency / total_audio) if total_audio > 0 else None
 
 
 def rank(summaries: dict[str, ProviderSummary], *, metric_key: str) -> list[str]:
@@ -129,6 +152,11 @@ def per_clip_rows(
             "latency_seconds": (
                 round(result.latency_seconds, 3) if result.latency_seconds is not None else None
             ),
+            "rtf": (
+                round(result.latency_seconds / result.duration_seconds, 3)
+                if result.latency_seconds and result.duration_seconds
+                else None
+            ),
             "error": result.error,
         }
         for key in enabled_metrics:
@@ -162,6 +190,7 @@ def summary_rows(
         for key in enabled_metrics:
             value = summary.metrics.get(key)
             row[key] = round(value, 4) if isinstance(value, (int, float)) else None
+        row["rtf"] = round(summary.rtf, 3) if summary.rtf is not None else None
         for label in ("p50", "p95", "p99"):
             value = summary.latency.get(label)
             row[f"latency_{label}_seconds"] = round(value, 3) if value is not None else None

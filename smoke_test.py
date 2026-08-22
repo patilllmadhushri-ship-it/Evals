@@ -211,6 +211,43 @@ def main() -> int:
     if offenders:
         print("      offenders:", offenders)
 
+    print("streaming latency maths")
+    from stt_eval import streaming
+
+    # A result covering audio 0.0-1.0s that arrives at 1.2s was 0.2s behind the
+    # speech it carried. That subtraction is the whole measurement.
+    events = [
+        streaming.StreamEvent(arrival_offset=1.2, audio_start=0.0, audio_end=1.0, text="hello", is_final=False),
+        streaming.StreamEvent(arrival_offset=2.1, audio_start=1.0, audio_end=2.0, text="there", is_final=False),
+        streaming.StreamEvent(arrival_offset=2.6, audio_start=0.0, audio_end=2.0, text="hello there", is_final=True),
+    ]
+    measured = streaming.StreamingMetrics(
+        provider="deepgram", audio_seconds=2.0, wall_seconds=2.7, events=events, pacing="realtime"
+    )
+    check("partial latency subtracts the audio it covers", abs(measured.partial_emission_latency - 0.15) < 1e-9)
+    check("finals latency measured from phrase end", abs(measured.finals_latency - 0.6) < 1e-9)
+    check("time to first partial is an absolute offset", abs(measured.time_to_first_partial - 1.2) < 1e-9)
+    check("partials and finals counted separately", len(measured.partials) == 2 and len(measured.finals) == 1)
+    check(
+        "RTF withheld under real-time pacing",
+        measured.rtf is None,  # pacing dominates the clock; the number would be meaningless
+    )
+    fast = streaming.StreamingMetrics(
+        provider="deepgram", audio_seconds=4.0, wall_seconds=1.0, events=events, pacing="fast"
+    )
+    check("RTF reported when sending as fast as possible", abs(fast.rtf - 0.25) < 1e-9)
+    check(
+        "a result cannot have negative latency",
+        streaming.StreamEvent(arrival_offset=0.5, audio_start=0.0, audio_end=1.0, text="x", is_final=True).latency == 0.0,
+    )
+    check("batch RTF divides latency by duration", abs(streaming.real_time_factor(3.0, 6.0) - 0.5) < 1e-9)
+    check("batch RTF is undefined without both figures", streaming.real_time_factor(None, 6.0) is None)
+    try:
+        streaming.measure(provider="sarvam", api_key="k", wav_bytes=b"", language="en-IN")
+        check("non-streaming providers are rejected clearly", False)
+    except streaming.StreamingUnsupported:
+        check("non-streaming providers are rejected clearly", True)
+
     print("csv parsing")
     mapping, errors = parse_ground_truth_csv(
         b"id,text\nclip1,hello world\nclip2,\n", "ground_truth.csv"
