@@ -8,11 +8,46 @@ partial results stream in as each clip completes.
 
 from __future__ import annotations
 
+import importlib
+import os
+import sys
 import time
 import uuid
 
 import pandas as pd
 import streamlit as st
+
+
+def _reload_local_modules() -> None:
+    """Pick up edits to `stt_eval/*` without restarting the server.
+
+    Streamlit re-executes this script on every rerun, but Python caches
+    imported modules, and Streamlit does not reload them. A server left
+    running across a code change therefore keeps serving the old modules,
+    and any newly added symbol fails to import from a stale one.
+
+    Reload deepest-first so parents rebind to fresh children; drop a module
+    outright if reloading raises, which forces a clean import next run.
+    Skipped while a run is in flight, since its worker threads are executing
+    code from these very modules.
+    """
+    if os.environ.get("STT_EVAL_AUTORELOAD", "1") == "0":
+        return
+    runner = st.session_state.get("runner")
+    if runner is not None and getattr(runner, "is_running", False):
+        return
+    names = [name for name in sys.modules if name == "stt_eval" or name.startswith("stt_eval.")]
+    for name in sorted(names, key=lambda name: name.count("."), reverse=True):
+        module = sys.modules.get(name)
+        if module is None:
+            continue
+        try:
+            importlib.reload(module)
+        except Exception:  # noqa: BLE001 - a stale module is worse than a re-import
+            sys.modules.pop(name, None)
+
+
+_reload_local_modules()
 
 from stt_eval import costs, env, export, report
 from stt_eval.config import (
