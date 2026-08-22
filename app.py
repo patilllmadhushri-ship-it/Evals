@@ -8,11 +8,13 @@ partial results stream in as each clip completes.
 
 from __future__ import annotations
 
+import hashlib
 import importlib
 import os
 import sys
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 
 import pandas as pd
 import streamlit as st
@@ -128,7 +130,8 @@ def init_state() -> None:
         "recorded_audio": [],
         "mic_round": 0,
         "mic_preview": {},
-        "mic_provider": "",
+        "mic_providers": [],
+        "mic_chosen_text": "",
         "input_source": "🎤 Microphone",
         "clip_languages": {},
         "ground_truth_map": {},
@@ -297,69 +300,136 @@ def step_upload() -> None:
                 for key in env.configured_providers()
                 if supports_language(key, st.session_state.language)
             ]
-            preview = st.session_state.mic_preview
-
-            if header[1].button(
-                "🎙️", help="Transcribe the recording", disabled=recording is None or not with_keys
-            ):
-                provider_choice = st.session_state.get("mic_provider") or (
-                    with_keys[0] if with_keys else ""
-                )
-                try:
-                    with st.spinner(f"Transcribing with {provider_label(provider_choice)}…"):
-                        clip_audio = normalize(
-                            recording.getvalue(),
-                            "recording.wav",
-                            sample_rate=st.session_state.sample_rate,
-                        )
-                        client = build(provider_choice, env.provider_key(provider_choice))
-                        result = client.transcribe(
-                            clip_audio.wav_bytes, st.session_state.language
-                        )
-                    st.session_state.mic_preview = {
-                        "provider": provider_choice,
-                        "text": result.text,
-                        "latency": result.latency_seconds,
-                        "seconds": clip_audio.duration_seconds,
-                    }
-                except (AudioError, ProviderError) as exc:
-                    st.session_state.mic_preview = {"error": str(exc)}
-                st.rerun()
-
-            if header[2].button("✕", help="Clear the transcript"):
-                st.session_state.mic_preview = {}
-                st.rerun()
-
-            draft = st.text_area(
-                "Transcript",
-                value=preview.get("text", ""),
-                placeholder="Recognition results will appear here",
-                height=160,
-                key=f"mic_draft_{st.session_state.mic_round}",
-                label_visibility="collapsed",
-            )
-
             if with_keys:
-                st.session_state.mic_provider = st.selectbox(
+                chosen_providers = st.multiselect(
                     "Recognise with",
                     with_keys,
+                    default=[
+                        key
+                        for key in (st.session_state.mic_providers or with_keys[:2])
+                        if key in with_keys
+                    ],
                     format_func=provider_label,
-                    key="mic_provider_select",
+                    key="mic_providers_select",
+                    help="Every provider you pick transcribes the same recording, so "
+                    "you can see them disagree before committing to a full run.",
                 )
+                st.session_state.mic_providers = chosen_providers
             else:
+                chosen_providers = []
                 st.caption(
                     f"No provider key found that supports {labels[st.session_state.language]}. "
                     "Add one to `.env` to recognise from here."
                 )
 
-            if preview.get("error"):
-                st.error(preview["error"])
-            elif preview.get("provider"):
-                st.caption(
-                    f"{provider_label(preview['provider'])} · "
-                    f"{preview['seconds']:.1f}s audio · "
-                    f"{preview['latency']:.2f}s to transcribe"
+            def _transcribe_all(raw: bytes) -> dict:
+                """Run every chosen provider over the same audio, concurrently."""
+                clip_audio = normalize(
+                    raw, "recording.wav", sample_rate=st.session_state.sample_rate
                 )
+
+                def one(provider_key: str) -> tuple[str, dict]:
+                    try:
+                        client = build(provider_key, env.provider_key(provider_key))
+                        outcome = client.transcribe(
+                            clip_audio.wav_bytes, st.session_state.language
+                        )
+                        return provider_key, {
+                            "text": outcome.text,
+                            "latency": outcome.latency_seconds,
+                        }
+                    except (AudioError, ProviderError) as exc:
+                        return provider_key, {"error": str(exc)}
+                    except Exception as exc:  # noqa: BLE001 - one provider must not sink the rest
+                        return provider_key, {"error": f"{type(exc).__name__}: {exc}"}
+
+                with ThreadPoolExecutor(max_workers=max(1, len(chosen_providers))) as pool:
+                    outcomes = dict(pool.map(one, chosen_providers))
+                return {
+                    "by_provider": outcomes,
+                    "seconds": clip_audio.duration_seconds,
+                    "audio_id": hashlib.sha1(raw).hexdigest(),
+                }
+
+            # Transcribe as soon as a new recording lands — no button press, so
+            # the transcript is simply there when you stop speaking.
+            preview = st.session_state.mic_preview
+            if recording is not None and chosen_providers:
+                audio_id = hashlib.sha1(recording.getvalue()).hexdigest()
+                stale = preview.get("audio_id") != audio_id or set(
+                    preview.get("by_provider", {})
+                ) != set(chosen_providers)
+                if stale:
+                    with st.spinner(
+                        f"Recognising with {len(chosen_providers)} provider(s)…"
+                    ):
+                        st.session_state.mic_preview = _transcribe_all(recording.getvalue())
+                    st.rerun()
+
+            if header[1].button(
+                "🎙️", help="Transcribe again", disabled=recording is None or not chosen_providers
+            ):
+                st.session_state.mic_preview = _transcribe_all(recording.getvalue())
+                st.rerun()
+
+            if header[2].button("✕", help="Clear the transcript"):
+                st.session_state.mic_preview = {}
+                st.session_state.mic_chosen_text = ""
+                st.rerun()
+
+            preview = st.session_state.mic_preview
+            by_provider = preview.get("by_provider", {})
+
+            if not by_provider:
+                st.text_area(
+                    "Transcript",
+                    value="",
+                    placeholder="Recognition results will appear here",
+                    height=120,
+                    key=f"mic_empty_{st.session_state.mic_round}",
+                    label_visibility="collapsed",
+                    disabled=True,
+                )
+            else:
+                st.caption(f"{preview.get('seconds', 0):.1f}s of audio")
+                for provider_key in chosen_providers:
+                    outcome = by_provider.get(provider_key, {})
+                    with st.container(border=True):
+                        row = st.columns([3, 1])
+                        row[0].markdown(f"**{provider_label(provider_key)}**")
+                        if outcome.get("error"):
+                            st.error(outcome["error"])
+                            continue
+                        row[1].caption(f"{outcome.get('latency', 0):.2f}s")
+                        st.write(outcome.get("text") or "_(returned nothing)_")
+                        if st.button(
+                            "Use this as ground truth",
+                            key=f"use_{provider_key}_{st.session_state.mic_round}",
+                            disabled=not (outcome.get("text") or "").strip(),
+                        ):
+                            st.session_state.mic_chosen_text = outcome.get("text", "")
+                            st.rerun()
+
+                texts = [
+                    (outcome.get("text") or "").strip()
+                    for outcome in by_provider.values()
+                    if not outcome.get("error")
+                ]
+                if len(set(texts)) > 1:
+                    st.info(
+                        "The providers disagree on this clip — which is exactly the "
+                        "kind of clip worth having in your dataset."
+                    )
+
+            st.markdown("**Ground truth for this clip**")
+            draft = st.text_area(
+                "Ground truth",
+                value=st.session_state.mic_chosen_text,
+                placeholder="Correct the transcript above, or type what you actually said",
+                height=110,
+                key=f"mic_draft_{st.session_state.mic_round}",
+                label_visibility="collapsed",
+            )
 
             actions = st.columns(2)
             with actions[0]:
@@ -391,6 +461,7 @@ def step_upload() -> None:
                     # Bump the widget keys so the recorder resets for the next clip.
                     st.session_state.mic_round += 1
                     st.session_state.mic_preview = {}
+                    st.session_state.mic_chosen_text = ""
                     st.rerun()
 
             st.caption(
