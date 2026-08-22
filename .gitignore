@@ -11,6 +11,11 @@ __pycache__/
 venv/
 *.egg-info/
 
+# Secrets — never commit real keys
+.env
+.env.*
+!.env.example
+
 # Streamlit
 .streamlit/secrets.toml
 

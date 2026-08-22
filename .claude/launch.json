@@ -5,7 +5,8 @@
       "name": "stt-eval-studio",
       "runtimeExecutable": "py",
       "runtimeArgs": ["-m", "streamlit", "run", "app.py", "--server.port", "8501", "--server.headless", "true"],
-      "port": 8501
+      "port": 8501,
+      "autoPort": false
     }
   ]
 }

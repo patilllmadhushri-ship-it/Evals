@@ -14,7 +14,7 @@ import uuid
 import pandas as pd
 import streamlit as st
 
-from stt_eval import costs, export, report
+from stt_eval import costs, env, export, report
 from stt_eval.config import (
     CHARACTER_ORIENTED_LANGUAGES,
     DEFAULT_CONCURRENCY,
@@ -46,6 +46,10 @@ STEPS = ["1 · Upload", "2 · Configure", "3 · Credentials", "4 · Run", "5 · 
 
 st.set_page_config(page_title="STT Evaluation Studio", page_icon="🎙️", layout="wide")
 
+# Credentials from a local, git-ignored .env pre-fill step 3. Values live in
+# process memory only — never in the results database, logs or exports.
+ENV_VALUES = env.load()
+
 
 # --------------------------------------------------------------------------
 # Session state
@@ -59,8 +63,10 @@ def init_state() -> None:
         "language": "en-IN",
         "selected_providers": [],
         "enabled_metrics": [spec.key for spec in METRIC_SPECS if spec.default_on],
-        "api_keys": {},
-        "judge_key": "",
+        "api_keys": {
+            provider: env.provider_key(provider) for provider in env.PROVIDER_ENV_VARS
+        },
+        "judge_key": env.judge_key(),
         "judge_model": DEFAULT_JUDGE_MODEL,
         "judge_effort": "medium",
         "sample_rate": DEFAULT_SAMPLE_RATE,
@@ -387,8 +393,18 @@ def step_credentials() -> None:
     st.header("3 · Credentials")
     st.warning(
         "Keys are held in this session's memory for the current run only. They are "
-        "never persisted to disk, written to logs, or included in exported results."
+        "never written to the results database, the logs, or an exported file."
     )
+
+    from_env = env.configured_providers()
+    if from_env or env.judge_key():
+        loaded = [provider_label(key) for key in from_env]
+        if env.judge_key():
+            loaded.append("LLM judge")
+        st.info(
+            "Pre-filled from your local `.env`: " + ", ".join(loaded)
+            + ". Edit a field below to override it for this run only."
+        )
 
     selected = st.session_state.selected_providers
     if not selected:
@@ -403,11 +419,17 @@ def step_credentials() -> None:
             continue
         keys[provider_key] = st.text_input(
             provider_label(provider_key),
-            value=keys.get(provider_key, ""),
+            value=keys.get(provider_key, "") or env.provider_key(provider_key),
             type="password",
             help=credential_hint(provider_key),
             key=f"key_{provider_key}",
         )
+        source = env.provider_key(provider_key)
+        if source and keys[provider_key] == source:
+            st.caption(
+                f"from `.env` · `{env.PROVIDER_ENV_VARS[provider_key]}` = "
+                f"`{env.mask(source)}`"
+            )
     st.session_state.api_keys = keys
 
     judge_needed = uses_judge()
@@ -420,10 +442,12 @@ def step_credentials() -> None:
         )
         st.session_state.judge_key = st.text_input(
             "Anthropic API key",
-            value=st.session_state.judge_key,
+            value=st.session_state.judge_key or env.judge_key(),
             type="password",
             help="Used only for the enabled LLM metrics.",
         )
+        if env.judge_key() and st.session_state.judge_key == env.judge_key():
+            st.caption(f"from `.env` · `ANTHROPIC_API_KEY` = `{env.mask(env.judge_key())}`")
         columns = st.columns(2)
         with columns[0]:
             st.session_state.judge_model = st.selectbox(

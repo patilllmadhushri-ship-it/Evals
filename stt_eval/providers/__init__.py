@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from .base import ProviderError, STTProvider, Transcription
 from .deepgram import DeepgramProvider
+from .elevenlabs import ElevenLabsProvider
 from .google import GoogleProvider
 from .mock import MockProvider
 from .openai import OpenAIProvider
@@ -19,6 +20,7 @@ PROVIDER_CLASSES: dict[str, type[STTProvider]] = {
     OpenAIProvider.key: OpenAIProvider,
     GoogleProvider.key: GoogleProvider,
     SarvamProvider.key: SarvamProvider,
+    ElevenLabsProvider.key: ElevenLabsProvider,
     MockProvider.key: MockProvider,
 }
 

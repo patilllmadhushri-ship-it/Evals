@@ -23,13 +23,19 @@ class SarvamProvider(STTProvider):
     credential_hint = "Sarvam API subscription key (dashboard.sarvam.ai)"
     supported_languages = SUPPORTED
 
-    def __init__(self, api_key: str, *, model: str = "saarika:v2", timeout: float = 180.0):
+    def __init__(self, api_key: str, *, model: str = "saaras:v3", timeout: float = 180.0):
         super().__init__(api_key, timeout=timeout)
         self.model = model
 
     def transcribe(self, audio: bytes, language: str) -> Transcription:
         files = {"file": ("clip.wav", audio, "audio/wav")}
-        data = {"model": self.model, "language_code": language}
+        data = {
+            "model": self.model,
+            "language_code": self.language_code(language),
+            # Transcribe verbatim rather than translating to English — the
+            # ground truth is in the source language.
+            "mode": "transcribe",
+        }
         headers = {"api-subscription-key": self.api_key}
 
         def call():

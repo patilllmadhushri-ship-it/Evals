@@ -96,6 +96,28 @@ def main() -> int:
         and GoogleProvider("k").language_code("hi-IN") == "hi-IN",
     )
 
+    print("credential loading")
+    from stt_eval import env as env_module
+
+    parsed = env_module.parse(
+        "# comment\nexport DEEPGRAM_API_KEY=abc123\nSARVAM_API_KEY='quoted'\nBLANK=\n"
+    )
+    check("env parsing handles export/quotes/comments", parsed["DEEPGRAM_API_KEY"] == "abc123")
+    check("quoted values unquoted", parsed["SARVAM_API_KEY"] == "quoted")
+    check("masking hides the middle", env_module.mask("sk_abcdefghijklmnop") == "sk_ab…mnop")
+    check(
+        "every provider needing a key has an env var",
+        all(
+            key in env_module.PROVIDER_ENV_VARS
+            for key in PROVIDER_CLASSES
+            if key != "mock"
+        ),
+    )
+    check(
+        "no key material is persisted",
+        "api_key" not in Path("stt_eval/store.py").read_text(encoding="utf-8"),
+    )
+
     print("csv parsing")
     mapping, errors = parse_ground_truth_csv(
         b"id,text\nclip1,hello world\nclip2,\n", "ground_truth.csv"

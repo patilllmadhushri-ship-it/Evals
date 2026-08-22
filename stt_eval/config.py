@@ -106,6 +106,7 @@ PROVIDER_RATES_USD_PER_MINUTE = {
     "openai": 0.0060,
     "google": 0.0160,
     "sarvam": 0.0050,
+    "elevenlabs": 0.0067,
     "mock": 0.0,
 }
 
