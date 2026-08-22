@@ -43,6 +43,7 @@ JUDGE_BACKENDS = {
 # the catalogue changes faster than this file does.
 DEFAULT_OPENROUTER_MODEL = "deepseek/deepseek-r1"
 OPENROUTER_MODELS = [
+    "nvidia/nemotron-3-ultra-550b-a55b:free",
     "deepseek/deepseek-r1",
     "openai/o3-mini",
     "openai/gpt-5",
@@ -51,6 +52,18 @@ OPENROUTER_MODELS = [
     "qwen/qwq-32b",
     "x-ai/grok-4",
 ]
+
+#: Slugs ending in `:free` are served on OpenRouter's free tier, which is rate
+#: limited and — unlike paid endpoints — may retain prompts for training. Judge
+#: prompts contain your ground truth and the providers' transcripts, so the UI
+#: says so before a run sends them there.
+FREE_TIER_SUFFIX = ":free"
+FREE_TIER_NOTE = (
+    "This is a `:free` endpoint. It is rate limited, so a large run may hit "
+    "throttling mid-way, and free endpoints can retain prompts for training. "
+    "Judge prompts contain your ground truth and every provider's transcript — "
+    "use a paid endpoint if that audio is confidential."
+)
 
 # Sent as attribution headers so the run shows up meaningfully in an
 # OpenRouter dashboard.

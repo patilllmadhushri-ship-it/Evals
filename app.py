@@ -21,6 +21,8 @@ from stt_eval.config import (
     DEFAULT_JUDGE_MODEL,
     DEFAULT_RETRIES,
     DEFAULT_SAMPLE_RATE,
+    FREE_TIER_NOTE,
+    FREE_TIER_SUFFIX,
     JUDGE_BACKENDS,
     JUDGE_MODELS,
     LANGUAGE_SUPPORT_NOTE,
@@ -509,6 +511,8 @@ def step_credentials() -> None:
             )
 
         if backend == "openrouter":
+            if st.session_state.judge_model.endswith(FREE_TIER_SUFFIX):
+                st.warning(FREE_TIER_NOTE)
             st.caption(
                 "OpenRouter reports the real cost of each judge call, so the judge "
                 "spend shown after the run is actual, not estimated."
