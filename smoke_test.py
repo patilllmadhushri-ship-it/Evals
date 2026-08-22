@@ -221,6 +221,25 @@ def main() -> int:
         and GoogleProvider("k")._model_for(16_000) == "latest_long",
     )
 
+    # Microphone recordings arrive as (id.wav, bytes) exactly like uploads, so
+    # they merge into one dataset and nothing downstream distinguishes them.
+    mixed_truth = {**GROUND_TRUTH, "rec1": "This one was recorded in the browser"}
+    mixed = build_dataset(
+        uploads + [("rec1.wav", make_wav(0.8))], mixed_truth
+    )
+    check("recordings merge with uploads", len(mixed.clips) == 4 and not mixed.errors)
+    check(
+        "recorded clip keeps its id",
+        any(clip.clip_id == "rec1" for clip in mixed.clips),
+    )
+    collision = build_dataset(
+        uploads + [("clip1.wav", make_wav(0.8))], GROUND_TRUTH
+    )
+    check(
+        "id collision between sources is caught",
+        any("duplicate clip id" in message for message in collision.errors),
+    )
+
     unmatched = build_dataset([("orphan.wav", make_wav(0.5))], GROUND_TRUTH)
     check(
         "unmatched audio reported specifically",

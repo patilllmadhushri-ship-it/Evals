@@ -68,12 +68,15 @@ from stt_eval.config import (
     SAMPLE_RATE_OPTIONS,
     SUPPORTED_UPLOAD_EXTENSIONS,
 )
+from stt_eval.audio import AudioError, normalize
 from stt_eval.dataset import build_dataset, clip_id_for, parse_ground_truth_csv
 from stt_eval.judge import JudgeError, create_judge
 from stt_eval.prompts import JUDGE_SYSTEM_PROMPT
 from stt_eval.metrics import LLM_KEYS, METRIC_SPECS, METRICS_BY_KEY
 from stt_eval.providers import (
     PROVIDER_CLASSES,
+    ProviderError,
+    build,
     credential_hint,
     provider_label,
     providers_for_language,
@@ -116,6 +119,9 @@ def init_state() -> None:
         "dataset": None,
         "runner": None,
         "uploaded_audio": [],
+        "recorded_audio": [],
+        "mic_round": 0,
+        "mic_preview": {},
         "ground_truth_map": {},
         "ground_truth_source": "ground_truth.csv",
     }
@@ -166,8 +172,16 @@ with st.sidebar:
     st.divider()
     st.caption(f"Run id: `{st.session_state.run_id}`")
     if st.button("Start a new run", width="stretch"):
-        for key in ("dataset", "runner", "uploaded_audio", "ground_truth_map", "inline_ground_truth"):
-            st.session_state[key] = None if key in ("dataset", "runner") else ({} if key.endswith("map") or key.startswith("inline") else [])
+        for key, empty in {
+            "dataset": None,
+            "runner": None,
+            "uploaded_audio": [],
+            "recorded_audio": [],
+            "ground_truth_map": {},
+            "inline_ground_truth": {},
+        }.items():
+            st.session_state[key] = empty
+        st.session_state.mic_round += 1  # reset the recorder widget too
         st.session_state.run_id = uuid.uuid4().hex[:12]
         goto(0)
     st.caption(
@@ -188,18 +202,161 @@ def step_upload() -> None:
         "each — as a CSV with `id,text` columns, or typed inline below."
     )
 
-    uploads = st.file_uploader(
-        "Audio files",
-        type=SUPPORTED_UPLOAD_EXTENSIONS,
-        accept_multiple_files=True,
-        help="WAV works end to end. MP3/M4A/FLAC/OGG are transcoded to mono 16 kHz PCM first.",
-    )
-    if uploads:
-        st.session_state.uploaded_audio = [(item.name, item.getvalue()) for item in uploads]
+    file_tab, mic_tab = st.tabs(["📁 Upload files", "🎤 Record with microphone"])
 
-    audio_files = st.session_state.uploaded_audio or []
+    with file_tab:
+        uploads = st.file_uploader(
+            "Audio files",
+            type=SUPPORTED_UPLOAD_EXTENSIONS,
+            accept_multiple_files=True,
+            help="WAV works end to end. MP3/M4A/FLAC/OGG are transcoded first.",
+        )
+        if uploads:
+            st.session_state.uploaded_audio = [(item.name, item.getvalue()) for item in uploads]
+
+    with mic_tab:
+        st.caption(
+            "Record a clip, give it an id, and add it to the dataset. Recordings "
+            "are scored exactly like uploaded files — same normalisation, same "
+            "providers, same metrics."
+        )
+        recorded = st.session_state.recorded_audio
+        default_id = f"rec{len(recorded) + 1}"
+        columns = st.columns([2, 3])
+        with columns[0]:
+            clip_name = st.text_input(
+                "Clip id",
+                value=default_id,
+                key=f"mic_name_{st.session_state.mic_round}",
+                help="Used as the clip's id, the same way a filename's stem is.",
+            )
+        with columns[1]:
+            recording = st.audio_input(
+                "Record",
+                key=f"mic_input_{st.session_state.mic_round}",
+                help="Your browser will ask for microphone permission the first time.",
+            )
+
+        clean_id = clip_id_for(clip_name or "")
+        taken = {clip_id_for(name) for name, _ in recorded} | {
+            clip_id_for(name) for name, _ in (st.session_state.uploaded_audio or [])
+        }
+        duplicate = clean_id in taken
+        if duplicate:
+            st.warning(f"`{clean_id}` is already taken — pick a different id.")
+
+        if recording is not None:
+            st.divider()
+            st.markdown("**Transcript**")
+            with_keys = [
+                key
+                for key in env.configured_providers()
+                if supports_language(key, st.session_state.language)
+            ]
+            if not with_keys:
+                st.caption(
+                    "No provider keys found for "
+                    f"{st.session_state.language}. Add one to `.env` (or type it in "
+                    "step 3) to transcribe a recording here."
+                )
+            else:
+                transcribe_columns = st.columns([2, 1])
+                with transcribe_columns[0]:
+                    preview_provider = st.selectbox(
+                        "Transcribe with",
+                        with_keys,
+                        format_func=provider_label,
+                        key=f"mic_provider_{st.session_state.mic_round}",
+                        label_visibility="collapsed",
+                    )
+                with transcribe_columns[1]:
+                    if st.button("Transcribe", width="stretch"):
+                        try:
+                            with st.spinner(f"Transcribing with {provider_label(preview_provider)}…"):
+                                clip_audio = normalize(
+                                    recording.getvalue(),
+                                    "recording.wav",
+                                    sample_rate=st.session_state.sample_rate,
+                                )
+                                client = build(
+                                    preview_provider, env.provider_key(preview_provider)
+                                )
+                                result = client.transcribe(
+                                    clip_audio.wav_bytes, st.session_state.language
+                                )
+                            st.session_state.mic_preview = {
+                                "provider": preview_provider,
+                                "text": result.text,
+                                "latency": result.latency_seconds,
+                                "seconds": clip_audio.duration_seconds,
+                            }
+                        except (AudioError, ProviderError) as exc:
+                            st.session_state.mic_preview = {"error": str(exc)}
+                        st.rerun()
+
+            preview = st.session_state.mic_preview
+            if preview.get("error"):
+                st.error(preview["error"])
+            elif preview.get("provider"):
+                st.caption(
+                    f"{provider_label(preview['provider'])} · "
+                    f"{preview['seconds']:.1f}s audio · {preview['latency']:.2f}s to transcribe"
+                )
+                draft = st.text_area(
+                    "What it heard — correct it before using it as ground truth",
+                    value=preview["text"] or "(empty — the provider returned nothing)",
+                    height=110,
+                    key=f"mic_draft_{st.session_state.mic_round}",
+                )
+                st.caption(
+                    "⚠️ A transcript used as its own ground truth scores near-zero "
+                    "error for that provider by construction, which makes the "
+                    "comparison meaningless. Fix every mistake here first — that "
+                    "correction *is* the ground truth."
+                )
+                if st.button("Use as ground truth for this clip", disabled=not clean_id):
+                    inline = dict(st.session_state.inline_ground_truth or {})
+                    inline[clean_id] = draft
+                    st.session_state.inline_ground_truth = inline
+                    st.success(
+                        f"Saved as the ground truth for `{clean_id}`. Switch the "
+                        "Ground truth selector to **Type inline per clip** to edit it."
+                    )
+
+        if st.button(
+            "Add recording to dataset",
+            type="primary",
+            disabled=recording is None or not clean_id or duplicate,
+        ):
+            st.session_state.recorded_audio = recorded + [
+                (f"{clean_id}.wav", recording.getvalue())
+            ]
+            # Bump the widget keys so the recorder resets for the next clip.
+            st.session_state.mic_round += 1
+            st.rerun()
+
+        if recorded:
+            st.markdown("**Recorded clips**")
+            for index, (name, raw) in enumerate(list(recorded)):
+                row = st.columns([2, 4, 1])
+                row[0].markdown(f"`{clip_id_for(name)}`")
+                row[1].audio(raw)
+                if row[2].button("Remove", key=f"drop_rec_{index}"):
+                    st.session_state.recorded_audio = [
+                        item for position, item in enumerate(recorded) if position != index
+                    ]
+                    st.rerun()
+
+    # Uploads and recordings feed one dataset; nothing downstream knows the difference.
+    audio_files = list(st.session_state.uploaded_audio or []) + list(
+        st.session_state.recorded_audio or []
+    )
     if audio_files:
-        st.success(f"{len(audio_files)} audio file(s) ready.")
+        recorded_count = len(st.session_state.recorded_audio or [])
+        summary = f"{len(audio_files)} clip(s) ready"
+        if recorded_count:
+            summary += f" ({recorded_count} recorded here)"
+        st.success(summary + ".")
 
     rates = list(SAMPLE_RATE_OPTIONS)
     st.session_state.sample_rate = st.radio(
@@ -240,6 +397,12 @@ def step_upload() -> None:
             st.caption(f"Parsed {len(ground_truth)} ground-truth row(s) from {csv_upload.name}.")
         else:
             ground_truth = st.session_state.ground_truth_map or {}
+        if st.session_state.recorded_audio:
+            st.caption(
+                "Your recordings need rows too — ids "
+                + ", ".join(f"`{clip_id_for(name)}`" for name, _ in st.session_state.recorded_audio)
+                + ". For recordings, typing the transcript inline is usually quicker."
+            )
         with st.expander("CSV format"):
             st.code("id,text\nclip1,The invoice is for five hundred rupees.\nclip2,Please call me back tomorrow.", language="csv")
             st.caption("`id` matches the audio filename without its extension — `clip1` ↔ `clip1.wav`.")

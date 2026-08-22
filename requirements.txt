@@ -1,4 +1,4 @@
-streamlit>=1.36
+streamlit>=1.41  # st.audio_input (microphone capture) landed in 1.41
 requests>=2.31
 numpy>=1.26
 soundfile>=0.12.1
