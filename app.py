@@ -435,6 +435,16 @@ def step_upload() -> None:
                 label_visibility="collapsed",
             )
 
+            # Save as you type. Requiring a button press here meant a typed
+            # transcript silently failed validation later, which looked like
+            # the app losing the text rather than never having taken it.
+            if clean_id and (draft or "").strip():
+                st.session_state.inline_ground_truth = {
+                    **(st.session_state.inline_ground_truth or {}),
+                    clean_id: draft.strip(),
+                }
+                st.caption(f"Saved as the ground truth for `{clean_id}`.")
+
             actions = st.columns(2)
             with actions[0]:
                 if st.button(
@@ -549,11 +559,34 @@ def step_upload() -> None:
             st.caption(f"Parsed {len(ground_truth)} ground-truth row(s) from {csv_upload.name}.")
         else:
             ground_truth = st.session_state.ground_truth_map or {}
-        if st.session_state.recorded_audio:
+
+        # A transcript typed in the recording panel counts even in CSV mode —
+        # otherwise text you just corrected by hand would be thrown away for
+        # want of a row in a file you never needed for that clip.
+        typed = {
+            clip_id_for(name): (st.session_state.inline_ground_truth or {}).get(
+                clip_id_for(name), ""
+            )
+            for name, _ in st.session_state.recorded_audio
+        }
+        typed = {key: value for key, value in typed.items() if value.strip()}
+        if typed:
+            ground_truth = {**ground_truth, **typed}
             st.caption(
-                "Your recordings need rows too — ids "
-                + ", ".join(f"`{clip_id_for(name)}`" for name, _ in st.session_state.recorded_audio)
-                + ". For recordings, typing the transcript inline is usually quicker."
+                "Using the transcripts you typed for "
+                + ", ".join(f"`{key}`" for key in sorted(typed))
+                + " — no CSV row needed for those."
+            )
+        missing_rows = [
+            clip_id_for(name)
+            for name, _ in st.session_state.recorded_audio
+            if clip_id_for(name) not in ground_truth
+        ]
+        if missing_rows:
+            st.caption(
+                "Still need ground truth for "
+                + ", ".join(f"`{key}`" for key in missing_rows)
+                + " — type it in the recording panel above, or add a CSV row."
             )
         with st.expander("CSV format"):
             st.code("id,text\nclip1,The invoice is for five hundred rupees.\nclip2,Please call me back tomorrow.", language="csv")
@@ -676,12 +709,17 @@ def step_configure() -> None:
         f"{len(available)} of {len(PROVIDER_CLASSES)} providers support "
         f"{labels[language]}. " + LANGUAGE_SUPPORT_NOTE
     )
+    # Default to providers you actually hold keys for, so step 3 does not open
+    # by demanding a credential for a provider you never chose.
+    with_keys = [key for key in available if key in env.configured_providers()]
+    fallback = with_keys or [key for key in available if key != "mock"][:2]
     selected = st.multiselect(
         "Compare",
         available,
         default=[key for key in st.session_state.selected_providers if key in available]
-        or [key for key in available if key != "mock"][:2],
+        or fallback,
         format_func=provider_label,
+        help="Providers with a key in your .env are selected by default.",
     )
     st.session_state.selected_providers = selected
     if unavailable:
