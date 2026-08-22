@@ -210,10 +210,10 @@ with st.sidebar:
 
 
 def step_upload() -> None:
-    st.header("1 · Upload audio and ground truth")
+    st.header("1 · Audio and ground truth")
     st.write(
-        "Upload one or more recordings, then supply the correct transcript for "
-        "each — as a CSV with `id,text` columns, or typed inline below."
+        "Record a clip or upload files, give each one its correct transcript, "
+        "then continue. Uploading a `ground_truth.csv` instead is under options."
     )
 
     recording = None
@@ -447,18 +447,8 @@ def step_upload() -> None:
                 }
                 st.caption(f"Saved as the ground truth for `{clean_id}`.")
 
-            actions = st.columns(2)
+            actions = st.columns([1, 1])
             with actions[0]:
-                if st.button(
-                    "Use as ground truth",
-                    disabled=not (draft or "").strip() or not clean_id,
-                    width="stretch",
-                ):
-                    inline = dict(st.session_state.inline_ground_truth or {})
-                    inline[clean_id] = draft
-                    st.session_state.inline_ground_truth = inline
-                    st.success(f"Saved as the ground truth for `{clean_id}`.")
-            with actions[1]:
                 if st.button(
                     "Add recording to dataset",
                     type="primary",
@@ -515,102 +505,145 @@ def step_upload() -> None:
     audio_files = list(st.session_state.uploaded_audio or []) + list(
         st.session_state.recorded_audio or []
     )
-    if audio_files:
-        recorded_count = len(st.session_state.recorded_audio or [])
-        summary = f"{len(audio_files)} clip(s) ready"
-        if recorded_count:
-            summary += f" ({recorded_count} recorded here)"
-        st.success(summary + ".")
+    typed_truth = st.session_state.inline_ground_truth or {}
+    recorded_ids = [clip_id_for(name) for name, _ in (st.session_state.recorded_audio or [])]
+    uploaded_ids = [clip_id_for(name) for name, _ in (st.session_state.uploaded_audio or [])]
 
-    rates = list(SAMPLE_RATE_OPTIONS)
-    st.session_state.sample_rate = st.radio(
-        "Normalise every clip to",
-        rates,
-        index=rates.index(st.session_state.sample_rate)
-        if st.session_state.sample_rate in rates
-        else rates.index(DEFAULT_SAMPLE_RATE),
-        format_func=lambda rate: SAMPLE_RATE_OPTIONS[rate],
-        help=(
-            "Every provider in the run receives audio at this rate, so the numbers "
-            "stay comparable. Benchmark at the rate your production audio actually "
-            "arrives at — for phone traffic that is 8 kHz."
-        ),
-    )
-    if st.session_state.sample_rate <= 8_000:
-        st.caption(
-            "Narrowband run: Deepgram and Google switch to their telephony models "
-            "automatically."
+    # The recording panel already collects the transcript, so a clip captured
+    # here needs nothing further. Only ask about ground truth for clips that
+    # still lack it — usually uploads, which cannot carry their own.
+    needs_truth = [
+        clip_id
+        for clip_id in recorded_ids + uploaded_ids
+        if not (typed_truth.get(clip_id) or "").strip()
+    ]
+
+    if audio_files and not needs_truth:
+        ready = st.columns([3, 1])
+        with ready[0]:
+            st.success(
+                f"**{len(audio_files)} clip(s) ready** — every one has ground truth."
+            )
+            st.caption(
+                ", ".join(f"`{clip_id}`" for clip_id in recorded_ids + uploaded_ids)
+            )
+        with ready[1]:
+            if st.button("Validate and continue →", type="primary", width="stretch", key="quick_go"):
+                with st.spinner("Decoding audio and matching ground truth…"):
+                    dataset = build_dataset(
+                        audio_files,
+                        {
+                            clip_id: text
+                            for clip_id, text in typed_truth.items()
+                            if clip_id in recorded_ids + uploaded_ids
+                        },
+                        ground_truth_source="the transcripts you typed",
+                        sample_rate=st.session_state.sample_rate,
+                        languages=st.session_state.clip_languages,
+                    )
+                st.session_state.dataset = dataset
+                if dataset.is_runnable:
+                    goto(1)
+                for message in dataset.errors:
+                    st.error(message)
+
+    with st.expander("Audio and ground-truth options", expanded=bool(needs_truth)):
+        rates = list(SAMPLE_RATE_OPTIONS)
+        st.session_state.sample_rate = st.radio(
+            "Normalise every clip to",
+            rates,
+            index=rates.index(st.session_state.sample_rate)
+            if st.session_state.sample_rate in rates
+            else rates.index(DEFAULT_SAMPLE_RATE),
+            format_func=lambda rate: SAMPLE_RATE_OPTIONS[rate],
+            help=(
+                "Every provider in the run receives audio at this rate, so the numbers "
+                "stay comparable. Benchmark at the rate your production audio actually "
+                "arrives at — for phone traffic that is 8 kHz."
+            ),
+        )
+        if st.session_state.sample_rate <= 8_000:
+            st.caption(
+                "Narrowband run: Deepgram and Google switch to their telephony models "
+                "automatically."
+            )
+
+        if needs_truth:
+            st.warning(
+                "Still need ground truth for "
+                + ", ".join(f"`{clip_id}`" for clip_id in needs_truth)
+            )
+
+        mode = st.radio(
+            "Ground truth",
+            ["CSV file (id, text)", "Type inline per clip"],
+            horizontal=True,
+            index=1 if recorded_ids and not uploaded_ids else 0,
         )
 
-    mode = st.radio(
-        "Ground truth",
-        ["CSV file (id, text)", "Type inline per clip"],
-        horizontal=True,
-    )
+        ground_truth: dict[str, str] = {}
+        csv_errors: list[str] = []
 
-    ground_truth: dict[str, str] = {}
-    csv_errors: list[str] = []
+        if mode.startswith("CSV"):
+            st.session_state.ground_truth_source = "ground_truth.csv"
+            csv_upload = st.file_uploader("Ground-truth CSV", type=["csv"], key="gt_csv")
+            if csv_upload is not None:
+                st.session_state.ground_truth_source = csv_upload.name
+                ground_truth, csv_errors = parse_ground_truth_csv(csv_upload.getvalue(), csv_upload.name)
+                st.session_state.ground_truth_map = ground_truth
+                st.caption(f"Parsed {len(ground_truth)} ground-truth row(s) from {csv_upload.name}.")
+            else:
+                ground_truth = st.session_state.ground_truth_map or {}
 
-    if mode.startswith("CSV"):
-        st.session_state.ground_truth_source = "ground_truth.csv"
-        csv_upload = st.file_uploader("Ground-truth CSV", type=["csv"], key="gt_csv")
-        if csv_upload is not None:
-            st.session_state.ground_truth_source = csv_upload.name
-            ground_truth, csv_errors = parse_ground_truth_csv(csv_upload.getvalue(), csv_upload.name)
-            st.session_state.ground_truth_map = ground_truth
-            st.caption(f"Parsed {len(ground_truth)} ground-truth row(s) from {csv_upload.name}.")
+            # A transcript typed in the recording panel counts even in CSV mode —
+            # otherwise text you just corrected by hand would be thrown away for
+            # want of a row in a file you never needed for that clip.
+            typed = {
+                clip_id_for(name): (st.session_state.inline_ground_truth or {}).get(
+                    clip_id_for(name), ""
+                )
+                for name, _ in st.session_state.recorded_audio
+            }
+            typed = {key: value for key, value in typed.items() if value.strip()}
+            if typed:
+                ground_truth = {**ground_truth, **typed}
+                st.caption(
+                    "Using the transcripts you typed for "
+                    + ", ".join(f"`{key}`" for key in sorted(typed))
+                    + " — no CSV row needed for those."
+                )
+            missing_rows = [
+                clip_id_for(name)
+                for name, _ in st.session_state.recorded_audio
+                if clip_id_for(name) not in ground_truth
+            ]
+            if missing_rows:
+                st.caption(
+                    "Still need ground truth for "
+                    + ", ".join(f"`{key}`" for key in missing_rows)
+                    + " — type it in the recording panel above, or add a CSV row."
+                )
+            with st.expander("CSV format"):
+                st.code("id,text\nclip1,The invoice is for five hundred rupees.\nclip2,Please call me back tomorrow.", language="csv")
+                st.caption("`id` matches the audio filename without its extension — `clip1` ↔ `clip1.wav`.")
         else:
-            ground_truth = st.session_state.ground_truth_map or {}
+            st.session_state.ground_truth_source = "the inline transcripts"
+            st.caption("One box per uploaded file. Leave none blank — empty ground truth is rejected.")
+            inline = dict(st.session_state.inline_ground_truth or {})
+            for filename, _ in audio_files:
+                clip_id = clip_id_for(filename)
+                inline[clip_id] = st.text_area(
+                    f"{filename}  →  id `{clip_id}`",
+                    value=inline.get(clip_id, ""),
+                    key=f"inline_{clip_id}",
+                    height=80,
+                )
+            st.session_state.inline_ground_truth = inline
+            ground_truth = {cid: text.strip() for cid, text in inline.items() if text.strip()}
+            st.session_state.ground_truth_map = ground_truth
 
-        # A transcript typed in the recording panel counts even in CSV mode —
-        # otherwise text you just corrected by hand would be thrown away for
-        # want of a row in a file you never needed for that clip.
-        typed = {
-            clip_id_for(name): (st.session_state.inline_ground_truth or {}).get(
-                clip_id_for(name), ""
-            )
-            for name, _ in st.session_state.recorded_audio
-        }
-        typed = {key: value for key, value in typed.items() if value.strip()}
-        if typed:
-            ground_truth = {**ground_truth, **typed}
-            st.caption(
-                "Using the transcripts you typed for "
-                + ", ".join(f"`{key}`" for key in sorted(typed))
-                + " — no CSV row needed for those."
-            )
-        missing_rows = [
-            clip_id_for(name)
-            for name, _ in st.session_state.recorded_audio
-            if clip_id_for(name) not in ground_truth
-        ]
-        if missing_rows:
-            st.caption(
-                "Still need ground truth for "
-                + ", ".join(f"`{key}`" for key in missing_rows)
-                + " — type it in the recording panel above, or add a CSV row."
-            )
-        with st.expander("CSV format"):
-            st.code("id,text\nclip1,The invoice is for five hundred rupees.\nclip2,Please call me back tomorrow.", language="csv")
-            st.caption("`id` matches the audio filename without its extension — `clip1` ↔ `clip1.wav`.")
-    else:
-        st.session_state.ground_truth_source = "the inline transcripts"
-        st.caption("One box per uploaded file. Leave none blank — empty ground truth is rejected.")
-        inline = dict(st.session_state.inline_ground_truth or {})
-        for filename, _ in audio_files:
-            clip_id = clip_id_for(filename)
-            inline[clip_id] = st.text_area(
-                f"{filename}  →  id `{clip_id}`",
-                value=inline.get(clip_id, ""),
-                key=f"inline_{clip_id}",
-                height=80,
-            )
-        st.session_state.inline_ground_truth = inline
-        ground_truth = {cid: text.strip() for cid, text in inline.items() if text.strip()}
-        st.session_state.ground_truth_map = ground_truth
-
-    for message in csv_errors:
-        st.warning(message)
+        for message in csv_errors:
+            st.warning(message)
 
     st.divider()
     if st.button("Validate and continue →", type="primary", disabled=not audio_files):
