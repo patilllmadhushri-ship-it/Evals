@@ -26,7 +26,7 @@ from .metric_selector import (  # noqa: F401 - re-exported as the layer's API
     set_weights,
 )
 from .metrics.use_case_metrics import category_scores
-from .prompt_analyzer import analyze  # noqa: F401
+from .prompt_analyzer import COMMON_USE_CASES, analyze  # noqa: F401
 from .requirement_extractor import (  # noqa: F401
     FIELD_TYPES,
     CriticalField,

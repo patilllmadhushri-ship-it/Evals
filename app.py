@@ -151,6 +151,9 @@ def init_state() -> None:
         "prompt_results": [],
         "prompt_metrics": [],
         "prompt_run_id": "",
+        # Once a use case exists it governs the dataset flow too — that is the
+        # point of analysing the prompt first.
+        "apply_usecase": True,
         "ground_truth_map": {},
         "ground_truth_source": "ground_truth.csv",
     }
@@ -312,13 +315,46 @@ def prompt_page() -> None:
     if profile is None:
         return
 
-    # -- 2. what the prompt requires ---------------------------------------
-    st.subheader("2 · What this agent needs from its STT")
-    top = st.columns([1, 2])
-    with top[0]:
-        st.metric("Detected use case", profile.use_case)
-    with top[1]:
-        st.caption(profile.objective or profile.summary)
+    # -- 2. confirm the use case -------------------------------------------
+    st.subheader("2 · Use case")
+    st.caption(
+        "Detected from your prompt. Change it if it is wrong — everything after "
+        "this point is scored against the use case you settle on here."
+    )
+    options = [profile.use_case] + [
+        item for item in usecase.COMMON_USE_CASES if item != profile.use_case
+    ]
+    case_columns = st.columns([3, 1])
+    with case_columns[0]:
+        picked = st.selectbox(
+            "Use case",
+            options,
+            index=0,
+            accept_new_options=True,
+            label_visibility="collapsed",
+            help="Pick one, or type your own — the list is a shortcut, not a limit.",
+        )
+    with case_columns[1]:
+        if st.button(
+            "Re-analyse for this",
+            disabled=picked == profile.use_case,
+            width="stretch",
+        ):
+            try:
+                with st.spinner(f"Re-reading the prompt as {picked}…"):
+                    profile = usecase.analyze(
+                        judge, st.session_state.agent_prompt, use_case_hint=picked
+                    )
+                st.session_state.usecase_profile = profile
+                st.session_state.metric_plan = usecase.select(profile)
+                st.session_state.usecase_scenario = None
+                st.session_state.prompt_results = []
+            except JudgeError as exc:
+                st.error(str(exc))
+            st.rerun()
+
+    st.subheader("3 · What this agent needs from its STT")
+    st.caption(profile.objective or profile.summary)
 
     fields_column, meta_column = st.columns(2)
     with fields_column:
@@ -401,8 +437,23 @@ def prompt_page() -> None:
             + f"  (sums to {total:.0%})"
         )
 
+    # The same use case scores an uploaded dataset just as well as a recording,
+    # so offer that here rather than making it a thing you have to know about.
+    with st.container(border=True):
+        hand_off = st.columns([3, 1])
+        hand_off[0].markdown(
+            "**Already have audio and ground truth?** Score your existing dataset "
+            "against this use case instead of recording a sentence — same "
+            "critical fields, same metrics, same use-case score."
+        )
+        if hand_off[1].button("Use my own audio →", width="stretch"):
+            st.session_state.apply_usecase = True
+            st.session_state.mode = "Dataset Evaluation"
+            st.session_state.step = 0
+            st.rerun()
+
     # -- 3. test scenario ---------------------------------------------------
-    st.subheader("3 · Test scenario")
+    st.subheader("4 · Test scenario")
     scenario_keys = list(usecase.SCENARIO_TYPES)
     scenario_columns = st.columns([2, 1])
     with scenario_columns[0]:
@@ -450,7 +501,7 @@ def prompt_page() -> None:
     )
 
     # -- 4. audio -----------------------------------------------------------
-    st.subheader("4 · Record it — or upload a file instead")
+    st.subheader("5 · Record it — or upload a file instead")
     mic_tab, upload_tab = st.tabs(["🎙 Record", "📁 Upload"])
     with mic_tab:
         recording = st.audio_input("Record", key=f"prompt_mic_{st.session_state.mic_round}")
@@ -469,7 +520,7 @@ def prompt_page() -> None:
             recording = uploaded
 
     # -- 5. providers -------------------------------------------------------
-    st.subheader("5 · Providers")
+    st.subheader("6 · Providers")
     language = st.session_state.language
     available = [
         key for key in providers_for_language(language) if key in env.configured_providers()
@@ -486,7 +537,7 @@ def prompt_page() -> None:
     st.session_state.prompt_providers = chosen
 
     # -- 6. evaluate --------------------------------------------------------
-    st.subheader("6 · Evaluate")
+    st.subheader("7 · Evaluate")
     if st.button(
         "Transcribe and score",
         type="primary",
@@ -535,7 +586,7 @@ def prompt_page() -> None:
     if not results:
         return
 
-    st.subheader("7 · Results")
+    st.subheader("8 · Results")
     st.caption(f"Said: “{results[0].ground_truth}”")
 
     metrics_used = st.session_state.prompt_metrics or []
@@ -1325,12 +1376,70 @@ def step_configure() -> None:
             + ", ".join(provider_label(key) for key in unavailable)
         )
 
+    # --- the link between the two modes -----------------------------------
+    # A use case analysed from a system prompt is not specific to a recording:
+    # it says what this agent needs from any audio, so it applies to an
+    # uploaded dataset just as well.
+    profile = st.session_state.usecase_profile
+    plan = st.session_state.metric_plan
+    with st.container(border=True):
+        if profile is None:
+            st.markdown("##### Use case — not set")
+            st.caption(
+                "Scoring will be generic: WER, CER and whichever meaning metrics "
+                "you tick. Analyse your voice agent's system prompt in "
+                "**Prompt-Based Evaluation** and this dataset gets scored on what "
+                "that agent actually needs — the order numbers, dates and places "
+                "it must capture — with a use-case score per provider."
+            )
+            if st.button("Set a use case from a system prompt →"):
+                st.session_state.mode = "Prompt-Based Evaluation"
+                st.rerun()
+        else:
+            st.markdown(f"##### Use case — {profile.use_case}")
+            st.caption(
+                (profile.objective or profile.summary)
+                + "  ·  Critical: "
+                + ", ".join(f"**{name}**" for name in profile.field_names)
+            )
+            columns = st.columns([2, 1])
+            with columns[0]:
+                use_plan = st.checkbox(
+                    "Score this dataset against the use case",
+                    value=st.session_state.apply_usecase,
+                    help=(
+                        "Runs the metrics recommended for this system prompt, "
+                        "checks each critical field in every clip, and adds a "
+                        "use-case score and a winner explanation to the results."
+                    ),
+                )
+                st.session_state.apply_usecase = use_plan
+            with columns[1]:
+                if st.button("Change use case", width="stretch"):
+                    st.session_state.mode = "Prompt-Based Evaluation"
+                    st.rerun()
+            if use_plan and plan is not None:
+                st.session_state.enabled_metrics = plan.runnable_metrics
+                st.caption(
+                    "Metrics for this run: "
+                    + ", ".join(
+                        METRICS_BY_KEY[key].label
+                        for key in plan.runnable_metrics
+                        if key in METRICS_BY_KEY
+                    )
+                )
+
     st.subheader("Metrics")
     st.caption(
         "Deterministic metrics are always on and need no extra API. LLM metrics "
         "cost money and time — each is independently toggleable and independently "
         "fault-isolated, so turning one off never affects the others."
     )
+    if profile is not None and st.session_state.apply_usecase:
+        st.caption(
+            "Ticked below by the use case — change any of them and the use-case "
+            "score simply scores whatever ran."
+        )
     chosen: list[str] = []
     for spec in METRIC_SPECS:
         columns = st.columns([1, 4])
@@ -1662,6 +1771,15 @@ def step_run() -> None:
                     per_provider_concurrency=st.session_state.concurrency,
                     judge_concurrency=st.session_state.judge_concurrency,
                     llm_sample_rate=st.session_state.llm_sample_rate,
+                    # The critical-field metric needs to be told what to look
+                    # for; without a use case it simply is not among the
+                    # enabled metrics, so this stays None.
+                    metric_context=(
+                        st.session_state.usecase_profile.as_context()
+                        if st.session_state.usecase_profile
+                        and st.session_state.apply_usecase
+                        else None
+                    ),
                     max_retries=DEFAULT_RETRIES,
                 ),
                 dataset=dataset,
@@ -1760,6 +1878,58 @@ def step_review() -> None:
 
     summaries = report.summarize(results, enabled_metrics=metrics)
     best = report.winners(summaries, metric_keys=metrics)
+
+    # --- use-case verdict, when this dataset was scored against one --------
+    profile = st.session_state.usecase_profile
+    plan = st.session_state.metric_plan
+    if profile is not None and plan is not None and st.session_state.apply_usecase:
+        st.subheader(f"Use case — {profile.use_case}")
+
+        # One row per provider, aggregated over every clip: a provider that
+        # loses a critical field on one clip in ten has still lost it.
+        per_provider: dict[str, list] = {}
+        for result in results:
+            per_provider.setdefault(result.provider, []).append(result)
+
+        rows = []
+        for provider, provider_results in per_provider.items():
+            scores = [usecase.score(plan, item).score for item in provider_results if item.ok]
+            lost: dict[str, int] = {}
+            for item in provider_results:
+                for name, verdict in item.metric_extra("critical_fields").get("fields", {}).items():
+                    if not verdict.get("preserved"):
+                        lost[name] = lost.get(name, 0) + 1
+            rows.append(
+                {
+                    "provider": provider_label(provider),
+                    "use-case score": f"{(sum(scores) / len(scores) * 100):.0f}%" if scores else "—",
+                    "clips": len(provider_results),
+                    "fields lost": ", ".join(f"{name} ×{count}" for name, count in lost.items()) or "none",
+                }
+            )
+        rows.sort(key=lambda row: row["use-case score"], reverse=True)
+        st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
+
+        # The winner explanation reads one clip at a time, so give it the
+        # worst clip per provider — the failure is what decides a use case.
+        worst = {}
+        for provider, provider_results in per_provider.items():
+            scored_ok = [item for item in provider_results if item.ok]
+            if scored_ok:
+                worst[provider] = min(scored_ok, key=lambda item: usecase.score(plan, item).score)
+        if worst:
+            verdict = usecase.explain_winner(
+                plan,
+                list(worst.values()),
+                use_case=profile.use_case.lower(),
+                labels={key: provider_label(key) for key in worst},
+            )
+            st.markdown(verdict.explanation)
+        st.caption(
+            "Judged on the clip each provider handled worst, since a use case is "
+            "decided by its failures rather than its averages."
+        )
+        st.divider()
 
     # --- Signals ----------------------------------------------------------
     st.subheader("Signals")

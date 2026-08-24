@@ -40,8 +40,34 @@ recording; false for an agent that merely acts on what it hears.\
 """
 
 
-def analyze(judge: Judge, system_prompt: str) -> Requirements:
-    """Turn a system prompt into the requirements its STT has to satisfy."""
+#: Offered alongside whatever the analyser detects, so the use case can be
+#: picked from a list rather than typed. Not a restriction — the selector
+#: accepts anything, and the analyser is never limited to these.
+COMMON_USE_CASES = [
+    "Logistics & delivery",
+    "Customer support",
+    "Healthcare & medical intake",
+    "Banking & payments",
+    "Interview scheduling",
+    "Food ordering",
+    "Insurance claims",
+    "Field service dispatch",
+    "Real estate enquiries",
+    "Education & admissions",
+    "Travel booking",
+    "Debt collection",
+]
+
+
+def analyze(
+    judge: Judge, system_prompt: str, *, use_case_hint: str = ""
+) -> Requirements:
+    """Turn a system prompt into the requirements its STT has to satisfy.
+
+    `use_case_hint` lets the user overrule the detected domain. The prompt is
+    still the source of the fields — the hint changes which reading of an
+    ambiguous prompt to take, not what counts as critical.
+    """
     if not (system_prompt or "").strip():
         raise JudgeError("Paste a system prompt first.")
 
@@ -76,13 +102,22 @@ def analyze(judge: Judge, system_prompt: str) -> Requirements:
         "additionalProperties": False,
     }
 
+    hint = (
+        f"\nThe user says this agent is for: {use_case_hint.strip()}. Read the "
+        "prompt in that light, and use it as the use case unless the prompt "
+        "plainly contradicts it.\n"
+        if use_case_hint.strip()
+        else ""
+    )
+
     payload = judge.ask_json(
         system=_SYSTEM,
         prompt=(
             "Analyse this voice-agent system prompt.\n\n"
             "--- SYSTEM PROMPT ---\n"
             f"{system_prompt.strip()}\n"
-            "--- END ---\n\n"
+            "--- END ---\n"
+            f"{hint}\n"
             "Return: the use case in two or three words using the domain's own "
             "vocabulary; the agent's objective in one sentence; a short summary; "
             "what the user is expected to say or do; the single most critical "
