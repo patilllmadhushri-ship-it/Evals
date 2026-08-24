@@ -297,6 +297,22 @@ class OpenRouterJudge(Judge):
                     self._schema_unsupported = True
                     last_error = detail
                     continue
+                # A quota or overload response is not a bug to debug — it is a
+                # condition with a specific fix, so say which one it is.
+                if response.status_code == 429:
+                    limit = "daily free-tier" if "free-models-per-day" in detail else "rate"
+                    raise JudgeError(
+                        f"{self.model} hit its {limit} limit on OpenRouter. Either add "
+                        "credits at openrouter.ai/credits, switch to a paid model in "
+                        "the judge settings, use an Anthropic key instead, or wait "
+                        "for the daily quota to reset."
+                    )
+                if response.status_code in (502, 503):
+                    raise JudgeError(
+                        f"{self.model} is temporarily overloaded upstream — common on "
+                        "`:free` endpoints. Retry, or pick a paid model for a run "
+                        "that has to finish."
+                    )
                 raise JudgeError(f"OpenRouter returned HTTP {response.status_code}: {detail}")
 
             payload = response.json()
