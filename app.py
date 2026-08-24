@@ -116,8 +116,10 @@ def init_state() -> None:
         "api_keys": {
             provider: env.provider_key(provider) for provider in env.PROVIDER_ENV_VARS
         },
-        "judge_backend": "anthropic",
-        "judge_key": env.judge_key("anthropic"),
+        # Default to a backend that actually has a key, so the judge is usable
+        # without visiting step 3 first.
+        "judge_backend": (env.configured_judge_backends() or ["anthropic"])[0],
+        "judge_key": "",
         "judge_model": DEFAULT_JUDGE_MODEL,
         "judge_effort": "medium",
         "sample_rate": DEFAULT_SAMPLE_RATE,
@@ -138,7 +140,9 @@ def init_state() -> None:
         "mic_chosen_text": "",
         "input_source": "🎤 Microphone",
         "clip_languages": {},
-        "mode": "Dataset Evaluation",
+        # Prompt-based is the landing mode: it is the one that needs no data
+        # up front, so it is where a first-time visitor can actually start.
+        "mode": "Prompt-Based Evaluation",
         "agent_prompt": "",
         "usecase_profile": None,
         "usecase_scenario": None,
@@ -211,14 +215,35 @@ def uses_judge() -> bool:
 
 
 def build_configured_judge():
-    """The judge the user configured in step 3, or None if no key is set."""
+    """The judge to use, or None when no backend has a key anywhere.
+
+    Falls back to whichever backend actually holds a key rather than insisting
+    on the selected one. The selection defaults to Anthropic, so an OpenRouter-
+    only setup would otherwise be told to go and configure a judge it already
+    has — which reads as the feature being broken.
+    """
     backend = st.session_state.judge_backend
     key = st.session_state.judge_key or env.judge_key(backend)
+
+    if not key:
+        for candidate in env.configured_judge_backends():
+            candidate_key = env.judge_key(candidate)
+            if candidate_key:
+                backend, key = candidate, candidate_key
+                st.session_state.judge_backend = candidate
+                break
     if not key:
         return None
+
+    # Keep the model consistent with the backend actually being used: an
+    # Anthropic model id means nothing to OpenRouter, and vice versa.
     model = st.session_state.judge_model
-    if backend == "openrouter" and model in JUDGE_MODELS:
-        model = OPENROUTER_MODELS[0]  # an Anthropic model id would not resolve
+    if backend == "openrouter" and model not in OPENROUTER_MODELS:
+        model = OPENROUTER_MODELS[0]
+    elif backend == "anthropic" and model not in JUDGE_MODELS:
+        model = DEFAULT_JUDGE_MODEL
+    st.session_state.judge_model = model
+
     return create_judge(
         backend=backend, api_key=key, model=model, effort=st.session_state.judge_effort
     )
@@ -660,23 +685,26 @@ def _join_names(names: list[str]) -> str:
 # Sidebar
 # --------------------------------------------------------------------------
 
-with st.sidebar:
-    st.title("🎙️ STT Evaluation Studio")
-
-    st.session_state.mode = st.radio(
-        "Mode",
-        ["Dataset Evaluation", "Prompt-Based Evaluation"],
-        index=0 if st.session_state.mode == "Dataset Evaluation" else 1,
-        help=(
-            "Dataset: score providers on audio you already have. "
-            "Prompt-based: paste your voice agent's system prompt and test the "
-            "things that prompt actually depends on."
-        ),
-    )
-    st.divider()
+# The mode switch lives at the top of the page, not in the sidebar: the
+# sidebar starts collapsed on a fresh browser, which hid the whole
+# prompt-based mode behind a control nobody could see.
+MODES = {
+    "📝 Prompt-Based Evaluation": "Prompt-Based Evaluation",
+    "🎧 Dataset Evaluation": "Dataset Evaluation",
+}
+_labels = list(MODES)
+_current = next(
+    (label for label, value in MODES.items() if value == st.session_state.mode),
+    _labels[0],
+)
+_picked = st.segmented_control(
+    "Mode", _labels, default=_current, key="mode_control", label_visibility="collapsed"
+)
+st.session_state.mode = MODES.get(_picked or _current, "Prompt-Based Evaluation")
 
 if st.session_state.mode == "Prompt-Based Evaluation":
     with st.sidebar:
+        st.title("🎙️ STT Evaluation Studio")
         st.caption(
             "Paste the system prompt of the agent you are evaluating. The app "
             "works out what its speech-to-text has to get right, then tests "
@@ -687,6 +715,7 @@ if st.session_state.mode == "Prompt-Based Evaluation":
     st.stop()
 
 with st.sidebar:
+    st.title("🎙️ STT Evaluation Studio")
     st.caption(
         "Upload your audio and the correct transcripts, run several providers "
         "over the same data, and see which one wins — on accuracy, meaning, "

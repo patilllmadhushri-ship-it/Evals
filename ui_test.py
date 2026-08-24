@@ -55,6 +55,9 @@ def main() -> int:
         # A configured APP_PASSCODE gates every page. Simulate an unlocked
         # session so these checks exercise the pages rather than the gate.
         app.session_state["unlocked"] = True
+        # Prompt-based is the landing mode, so the dataset pages must be asked
+        # for explicitly — otherwise these checks silently render the wrong page.
+        app.session_state["mode"] = "Dataset Evaluation"
         app.session_state["step"] = step
         app.session_state["run_id"] = RUN_ID
         app.session_state["dataset"] = dataset
@@ -73,6 +76,11 @@ def main() -> int:
             # silently-blank page passes. It did exactly that once.
             failures += 1
             print(f"  FAIL  step {step} ({name}): rendered no content")
+        elif "Prompt-Based" in headers[0]:
+            # And the wrong page renders content of its own, which passes just
+            # as happily unless the header is checked against the mode asked for.
+            failures += 1
+            print(f"  FAIL  step {step} ({name}): rendered the prompt page instead")
         else:
             print(f"  PASS  step {step} ({name}) — {headers[0]}")
 
