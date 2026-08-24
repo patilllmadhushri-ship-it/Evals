@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 from typing import Callable, Literal
 
 from ..judge import Judge, JudgeError
-from . import llm_metrics, usecase_metrics
+from . import llm_metrics, use_case_metrics
 from .base import MetricValue
 from .wer import DeterministicScores, score_deterministic
 
@@ -159,7 +159,7 @@ _LLM_RUNNERS: dict[str, Callable[..., MetricValue]] = {
     "llm_wer": llm_metrics.llm_wer_cer,
     "semantic_wer": llm_metrics.semantic_wer,
     "semantic_match": llm_metrics.semantic_match,
-    "critical_fields": usecase_metrics.critical_fields,
+    "critical_fields": use_case_metrics.critical_fields,
 }
 
 #: Metrics that need to be told what to look for, beyond the transcript pair.

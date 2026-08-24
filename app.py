@@ -54,7 +54,7 @@ _reload_local_modules()
 from stt_eval import costs, env, export, report, usecase
 from stt_eval import signals as signals_module
 from stt_eval import streaming
-from stt_eval.metrics import usecase_metrics
+from stt_eval.metrics import use_case_metrics
 from stt_eval.config import (
     CHARACTER_ORIENTED_LANGUAGES,
     DEFAULT_CONCURRENCY,
@@ -141,6 +141,7 @@ def init_state() -> None:
         "agent_prompt": "",
         "usecase_profile": None,
         "usecase_scenario": None,
+        "metric_plan": None,
         "prompt_providers": [],
         "prompt_results": [],
         "prompt_metrics": [],
@@ -240,8 +241,9 @@ def prompt_page() -> None:
     if st.button("Analyse prompt", type="primary", disabled=not st.session_state.agent_prompt.strip()):
         try:
             with st.spinner("Reading the prompt…"):
-                profile = usecase.extract_requirements(judge, st.session_state.agent_prompt)
+                profile = usecase.analyze(judge, st.session_state.agent_prompt)
             st.session_state.usecase_profile = profile
+            st.session_state.metric_plan = usecase.select(profile)
             st.session_state.usecase_scenario = None
             st.session_state.prompt_results = []
         except JudgeError as exc:
@@ -258,40 +260,114 @@ def prompt_page() -> None:
     with top[0]:
         st.metric("Detected use case", profile.use_case)
     with top[1]:
-        st.caption(profile.summary)
+        st.caption(profile.objective or profile.summary)
 
-    fields_column, metrics_column = st.columns(2)
+    fields_column, meta_column = st.columns(2)
     with fields_column:
         st.markdown("**Critical information**")
         for item in profile.fields:
-            st.markdown(f"- **{item.name}** · `{item.type}`")
+            st.markdown(f"✓ **{item.name}** · `{item.type}`")
             if item.why:
                 st.caption(f"  {item.why}")
         if not profile.fields:
             st.info("No critical fields were found — this prompt may not collect data.")
-
-    recommendations = usecase.recommend_metrics(profile)
-    with metrics_column:
-        st.markdown("**Recommended metrics**")
-        for recommendation in recommendations:
-            label = METRICS_BY_KEY[recommendation.metric].label if recommendation.metric in METRICS_BY_KEY else recommendation.metric.replace("_", " ").title()
-            st.markdown(f"- ✓ **{label}**")
-            st.caption(f"  Why: {recommendation.reason}")
+    with meta_column:
+        if profile.critical_action:
+            st.markdown("**Critical action**")
+            st.markdown(f"✓ {profile.critical_action}")
+        if profile.user_actions:
+            st.markdown("**Expected of the caller**")
+            for action in profile.user_actions:
+                st.caption(f"- {action}")
+        st.markdown("**Transcription needs**")
+        st.caption(
+            ("✓" if profile.semantic_matters else "✗")
+            + " Meaning must survive · "
+            + ("✓" if profile.exact_transcription_matters else "✗")
+            + " Exact wording matters"
+        )
 
     if not profile.fields:
         return
 
+    plan: usecase.MetricPlan = st.session_state.metric_plan or usecase.select(profile)
+    st.session_state.metric_plan = plan
+
+    st.markdown("**Recommended metrics**")
+    for tier in ("PRIMARY", "SECONDARY", "BASELINE"):
+        members = plan.by_tier(tier)
+        if not members:
+            continue
+        st.markdown(f"**{tier}** — {usecase.TIER_RATIONALE[tier]}")
+        for selection in members:
+            st.markdown(f"- ✓ **{selection.label}**")
+            st.caption(f"  Why: {selection.reason}")
+
+    with st.expander("Adjust the weighting of the use-case score"):
+        st.caption(
+            "Defaults give the primary tier "
+            f"{usecase.TIER_WEIGHTS['PRIMARY']:.0%}, secondary "
+            f"{usecase.TIER_WEIGHTS['SECONDARY']:.0%} and baseline "
+            f"{usecase.TIER_WEIGHTS['BASELINE']:.0%}, split evenly within each. "
+            "Change any of them — they are renormalised to sum to 100%."
+        )
+        adjusted: dict[str, float] = {}
+        for selection in plan.selections:
+            if selection.weight <= 0:
+                continue
+            adjusted[selection.metric] = st.slider(
+                selection.label,
+                min_value=0.0,
+                max_value=1.0,
+                value=float(round(selection.weight, 2)),
+                step=0.05,
+                key=f"weight_{selection.metric}",
+            )
+        columns = st.columns(2)
+        if columns[0].button("Apply weights"):
+            usecase.set_weights(plan, adjusted)
+            st.session_state.metric_plan = plan
+            st.rerun()
+        if columns[1].button("Reset to defaults"):
+            usecase.apply_default_weights(plan)
+            st.session_state.metric_plan = plan
+            st.rerun()
+        total = sum(item.weight for item in plan.selections)
+        st.caption(
+            "In effect: "
+            + " · ".join(
+                f"{item.label} {item.weight:.0%}"
+                for item in plan.selections
+                if item.weight > 0
+            )
+            + f"  (sums to {total:.0%})"
+        )
+
     # -- 3. test scenario ---------------------------------------------------
     st.subheader("3 · Test scenario")
-    if st.button("Generate a sentence that tests these fields"):
-        try:
-            with st.spinner("Writing a test sentence…"):
-                st.session_state.usecase_scenario = usecase.generate_scenario(
-                    judge, profile, language=st.session_state.language
-                )
-        except JudgeError as exc:
-            st.error(str(exc))
-        st.rerun()
+    scenario_keys = list(usecase.SCENARIO_TYPES)
+    scenario_columns = st.columns([2, 1])
+    with scenario_columns[0]:
+        scenario_type = st.selectbox(
+            "Scenario type",
+            scenario_keys,
+            format_func=lambda key: usecase.SCENARIO_TYPES[key][0],
+            help="Each type stresses a different failure mode for the same fields.",
+        )
+        st.caption(usecase.SCENARIO_TYPES[scenario_type][1])
+    with scenario_columns[1]:
+        if st.button("Generate sentence", width="stretch"):
+            try:
+                with st.spinner("Writing a test sentence…"):
+                    st.session_state.usecase_scenario = usecase.generate(
+                        judge,
+                        profile,
+                        scenario_type=scenario_type,
+                        language=st.session_state.language,
+                    )
+            except JudgeError as exc:
+                st.error(str(exc))
+            st.rerun()
 
     scenario = st.session_state.usecase_scenario
     if scenario is None:
@@ -299,6 +375,7 @@ def prompt_page() -> None:
         return
 
     st.success(f"### “{scenario.sentence}”")
+    st.caption(f"Scenario: **{scenario.label}**")
     if scenario.expected:
         st.caption(
             "Values under test — "
@@ -314,9 +391,24 @@ def prompt_page() -> None:
         key="scenario_text",
     )
 
-    # -- 4. record ----------------------------------------------------------
-    st.subheader("4 · Read it into the microphone")
-    recording = st.audio_input("Record", key=f"prompt_mic_{st.session_state.mic_round}")
+    # -- 4. audio -----------------------------------------------------------
+    st.subheader("4 · Record it — or upload a file instead")
+    mic_tab, upload_tab = st.tabs(["🎙 Record", "📁 Upload"])
+    with mic_tab:
+        recording = st.audio_input("Record", key=f"prompt_mic_{st.session_state.mic_round}")
+        st.caption(
+            "If your browser blocks the microphone, or you are running this "
+            "somewhere without one, use the Upload tab — the rest of the flow is "
+            "identical."
+        )
+    with upload_tab:
+        uploaded = st.file_uploader(
+            "Audio of someone reading the sentence above",
+            type=SUPPORTED_UPLOAD_EXTENSIONS,
+            key="prompt_upload",
+        )
+        if uploaded is not None:
+            recording = uploaded
 
     # -- 5. providers -------------------------------------------------------
     st.subheader("5 · Providers")
@@ -342,7 +434,7 @@ def prompt_page() -> None:
         type="primary",
         disabled=recording is None or not chosen,
     ):
-        metrics = [r.metric for r in recommendations if r.metric in METRICS_BY_KEY]
+        metrics = plan.runnable_metrics
         run_id = f"prompt-{uuid.uuid4().hex[:8]}"
         try:
             with st.spinner("Transcribing and scoring…"):
@@ -365,12 +457,7 @@ def prompt_page() -> None:
                         enabled_metrics=metrics,
                         per_provider_concurrency=len(chosen),
                         judge_concurrency=st.session_state.judge_concurrency,
-                        metric_context={
-                            "fields": [
-                                {"name": item.name, "type": item.type} for item in profile.fields
-                            ],
-                            "expected": scenario.expected,
-                        },
+                        metric_context=profile.as_context(scenario.expected),
                     ),
                     dataset=dataset,
                     store=store,
@@ -393,24 +480,40 @@ def prompt_page() -> None:
     st.subheader("7 · Results")
     st.caption(f"Said: “{results[0].ground_truth}”")
 
-    weights = usecase.SCORE_WEIGHTS
+    metrics_used = st.session_state.prompt_metrics or []
+
+    # -- the recommendation, in the agent's terms ---------------------------
+    verdict = usecase.explain_winner(
+        plan,
+        results,
+        use_case=profile.use_case.lower(),
+        labels={result.provider: provider_label(result.provider) for result in results},
+    )
+    if verdict.winner:
+        st.success(f"**Recommended: {provider_label(verdict.winner)}**")
+    st.markdown(verdict.explanation)
+
+    # -- comparison table ---------------------------------------------------
+    st.markdown("**Side by side**")
+    providers, rows = usecase.comparison_table(plan, results)
+    table = pd.DataFrame(rows).rename(
+        columns={provider: provider_label(provider) for provider in providers}
+    )
+    st.dataframe(table, width="stretch", hide_index=True)
+
     with st.expander("How the use-case score is weighted"):
-        for metric, weight in weights.items():
-            label = METRICS_BY_KEY[metric].label if metric in METRICS_BY_KEY else metric
-            st.markdown(f"- **{label}** — {weight:.0%}")
-            st.caption(f"  {usecase.WEIGHT_RATIONALE[metric]}")
+        for selection in plan.selections:
+            if selection.weight <= 0:
+                continue
+            st.markdown(f"- **{selection.label}** — {selection.weight:.0%} · {selection.tier}")
+            st.caption(f"  {selection.reason}")
         st.caption(
-            "Weights are renormalised over whichever of these actually ran, so a "
-            "missing metric does not silently deflate the score."
+            "Weights are renormalised over whichever metrics actually produced a "
+            "value, so a judge failure lowers confidence rather than silently "
+            "deflating the score. Adjust them in step 2."
         )
 
-    metrics_used = st.session_state.prompt_metrics or []
-    summaries = report.summarize(results, enabled_metrics=metrics_used)
-
-    scored = []
-    for result in results:
-        values = {key: result.metric_value(key) for key in weights}
-        scored.append((usecase.score(values), result))
+    scored = [(usecase.score(plan, result), result) for result in results]
     scored.sort(key=lambda pair: pair[0].score, reverse=True)
 
     for use_case_score, result in scored:
@@ -441,7 +544,8 @@ def prompt_page() -> None:
                 ]
                 st.warning(
                     f"Scored on {len(use_case_score.parts)} of "
-                    f"{len(usecase.SCORE_WEIGHTS)} signals — "
+                    f"{len(use_case_score.parts) + len(use_case_score.missing)} "
+                    "weighted metrics — "
                     + ", ".join(missing_labels)
                     + " did not run, so the weighting was renormalised over what "
                     "did. Compare this score with care."
@@ -475,7 +579,7 @@ def prompt_page() -> None:
                 else:
                     st.success("**Why:** every value this agent needs survived transcription.")
 
-                categories = usecase_metrics.category_scores(per_field)
+                categories = use_case_metrics.category_scores(per_field)
                 if categories:
                     columns = st.columns(len(categories))
                     for column, (metric, value) in zip(columns, categories.items()):

@@ -1,329 +1,39 @@
-"""Use-case-aware evaluation, driven by a voice agent's own system prompt.
+"""Use-case-aware scoring, comparison and explanation.
 
-The dataset workflow asks "how accurate is this provider on my audio". This
-layer asks a narrower and more useful question: **does this provider capture the
-things my agent actually needs?** A logistics agent that mishears a delivery
-date has failed, whatever its word error rate; a support agent that renders
-"five hundred" as "500" has not.
+Also the public face of the layer: the UI imports this one module rather than
+five, while the pieces live where the architecture says they should —
+`prompt_analyzer`, `requirement_extractor`, `metric_selector`,
+`scenario_generator` and `metrics/use_case_metrics`.
 
-The chain is:
-
-    system prompt -> critical fields -> recommended metrics -> test scenario
-
-Every step is derived from the prompt rather than a fixed list of domains, so an
-agent for a use case nobody anticipated works the same way. The judge client
-does the extraction, which is why this module holds no domain vocabulary of its
-own beyond the field *types* used to group results.
-
-Nothing here transcribes or scores audio — that stays with the existing runner,
-providers and metric registry. This module only decides what to look for.
+The product principle this exists to serve: the provider with the lowest word
+error rate is not necessarily the best provider for the job. A run is scored
+against what the agent actually needs, and the winner is explained in those
+terms rather than by a number nobody can decompose.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from .judge import Judge, JudgeError
-
-#: Field types the extractor may assign. Kept small and generic so the rollups
-#: below stay meaningful; the *fields* themselves are free-form.
-FIELD_TYPES = ("number", "identifier", "date", "time", "location", "name", "other")
-
-#: Which recommended metric each field type implies, and why. The rationale is
-#: shown to the user verbatim — a recommendation nobody can interrogate is
-#: indistinguishable from a guess.
-TYPE_TO_METRIC = {
-    "number": ("number_accuracy", "the agent must capture numeric values exactly"),
-    "identifier": ("number_accuracy", "identifiers are digit strings where one wrong character is a wrong record"),
-    "quantity": ("number_accuracy", "quantities decide what is actually ordered or dispensed"),
-    "date": ("date_accuracy", "a misheard date sends the work to the wrong day"),
-    "time": ("date_accuracy", "a misheard time sends the work to the wrong slot"),
-    "location": ("location_accuracy", "a misheard place sends the work to the wrong address"),
-    "name": ("name_accuracy", "a misheard name attaches the work to the wrong person"),
-    "other": ("entity_accuracy", "this field is required by the prompt and must survive transcription"),
-}
-
-#: Metrics that are always recommended, whatever the prompt says.
-BASELINE_METRICS = {
-    "wer": "the standard literal accuracy baseline, comparable across providers and datasets",
-    "cer": "catches spelling and segmentation errors that WER's word-level view misses",
-    "critical_fields": "checks the specific values this system prompt says the agent must collect",
-    "semantic_match": "confirms the transcript still means what the speaker said, beyond the individual fields",
-}
-
-
-@dataclass
-class CriticalField:
-    """One thing the agent must capture correctly, per its own system prompt."""
-
-    name: str
-    type: str
-    why: str = ""
-
-    @property
-    def metric(self) -> str:
-        return TYPE_TO_METRIC.get(self.type, TYPE_TO_METRIC["other"])[0]
-
-
-@dataclass
-class UseCaseProfile:
-    use_case: str
-    summary: str
-    fields: list[CriticalField] = field(default_factory=list)
-    raw_prompt: str = ""
-
-    @property
-    def field_names(self) -> list[str]:
-        return [item.name for item in self.fields]
-
-    def fields_of_type(self, *types: str) -> list[CriticalField]:
-        return [item for item in self.fields if item.type in types]
-
-
-@dataclass
-class Recommendation:
-    metric: str
-    reason: str
-    #: Fields that drove this recommendation, for the explanation.
-    driven_by: list[str] = field(default_factory=list)
-
-
-@dataclass
-class TestScenario:
-    """A sentence written to exercise this prompt's critical fields."""
-
-    sentence: str
-    expected: dict[str, str] = field(default_factory=dict)  # field name -> spoken value
-    notes: str = ""
-
-
-_EXTRACTION_SYSTEM = """\
-You analyse voice-agent system prompts to decide what a speech-to-text engine \
-must transcribe correctly for that agent to work.
-
-Read the prompt and identify the information the agent is required to collect, \
-confirm or act on. These are the values where a transcription error changes the \
-outcome — an order number, a delivery date, a dosage, a customer name, an \
-address, an amount.
-
-Ignore instructions about tone, persona, formatting, escalation policy or \
-conversation flow: those do not depend on transcription accuracy. Do not invent \
-fields the prompt does not call for, and do not pad the list to look thorough — \
-a prompt that collects two things has two critical fields.
-
-Classify each field by type so downstream metrics can be grouped: number, \
-identifier, date, time, location, name, or other. Name the use case in two or \
-three words, in the domain's own vocabulary.\
-"""
-
-_SCENARIO_SYSTEM = """\
-You write short test utterances for evaluating speech-to-text engines.
-
-Given a use case and the fields an agent must capture, write ONE natural \
-sentence a real caller would say, containing a concrete value for every field. \
-It has to be speakable aloud in a few seconds by someone reading it off a \
-screen.
-
-Make the values genuinely testable — the kinds of thing recognisers get wrong. \
-Prefer multi-digit numbers over "one" or "two", a real place name over "here", a \
-specific date over "tomorrow", a name that is not the most common spelling. \
-Never use placeholder text like [NAME] or XXX; write the actual value.
-
-Return the sentence and, separately, the exact spoken value you used for each \
-field, so the evaluation can check each one individually.\
-"""
-
-
-def extract_requirements(judge: Judge, system_prompt: str) -> UseCaseProfile:
-    """Read a voice agent's system prompt and find what its STT must get right."""
-    if not (system_prompt or "").strip():
-        raise JudgeError("Paste a system prompt first.")
-
-    schema = {
-        "type": "object",
-        "properties": {
-            "use_case": {"type": "string"},
-            "summary": {"type": "string"},
-            "fields": {
-                "type": "array",
-                "items": {
-                    "type": "object",
-                    "properties": {
-                        "name": {"type": "string"},
-                        "type": {"type": "string", "enum": list(FIELD_TYPES)},
-                        "why": {"type": "string"},
-                    },
-                    "required": ["name", "type", "why"],
-                    "additionalProperties": False,
-                },
-            },
-        },
-        "required": ["use_case", "summary", "fields"],
-        "additionalProperties": False,
-    }
-
-    payload = judge.ask_json(
-        system=_EXTRACTION_SYSTEM,
-        prompt=(
-            "Analyse this voice-agent system prompt.\n\n"
-            "--- SYSTEM PROMPT ---\n"
-            f"{system_prompt.strip()}\n"
-            "--- END ---\n\n"
-            "Return the use case, a one-sentence summary of what the agent does, "
-            "and the critical fields its speech-to-text must capture correctly. "
-            "For each field give a short `why` explaining the consequence of "
-            "getting it wrong."
-        ),
-        schema=schema,
-    )
-
-    fields = []
-    for entry in payload.get("fields", []):
-        name = str(entry.get("name", "")).strip()
-        if not name:
-            continue
-        field_type = str(entry.get("type", "other")).strip().lower()
-        fields.append(
-            CriticalField(
-                name=name,
-                type=field_type if field_type in FIELD_TYPES else "other",
-                why=str(entry.get("why", "")).strip(),
-            )
-        )
-
-    return UseCaseProfile(
-        use_case=str(payload.get("use_case", "")).strip() or "Unclassified",
-        summary=str(payload.get("summary", "")).strip(),
-        fields=fields,
-        raw_prompt=system_prompt.strip(),
-    )
-
-
-def recommend_metrics(profile: UseCaseProfile) -> list[Recommendation]:
-    """Choose the metrics that matter for this prompt, with reasons.
-
-    Baselines are always included — WER and CER stay comparable across runs and
-    providers — and field-driven metrics are added on top, each carrying the
-    fields that justified it.
-    """
-    recommendations: list[Recommendation] = [
-        Recommendation(metric=key, reason=reason)
-        for key, reason in BASELINE_METRICS.items()
-    ]
-
-    driven: dict[str, list[str]] = {}
-    reasons: dict[str, str] = {}
-    for item in profile.fields:
-        metric, why = TYPE_TO_METRIC.get(item.type, TYPE_TO_METRIC["other"])
-        driven.setdefault(metric, []).append(item.name)
-        reasons.setdefault(metric, why)
-
-    for metric, names in driven.items():
-        if metric in BASELINE_METRICS:
-            # Fold the field names into the baseline's own explanation.
-            for recommendation in recommendations:
-                if recommendation.metric == metric:
-                    recommendation.driven_by = names
-            continue
-        recommendations.append(
-            Recommendation(
-                metric=metric,
-                reason=(
-                    f"The system prompt requires the agent to capture "
-                    f"{_join(names)}, and {reasons[metric]}."
-                ),
-                driven_by=names,
-            )
-        )
-    return recommendations
-
-
-def _join(names: list[str]) -> str:
-    if len(names) == 1:
-        return names[0]
-    return ", ".join(names[:-1]) + f" and {names[-1]}"
-
-
-def generate_scenario(judge: Judge, profile: UseCaseProfile, *, language: str = "en-IN") -> TestScenario:
-    """Write a sentence that exercises this prompt's critical fields."""
-    if not profile.fields:
-        raise JudgeError(
-            "No critical fields were extracted, so there is nothing specific to test."
-        )
-
-    schema = {
-        "type": "object",
-        "properties": {
-            "sentence": {"type": "string"},
-            "values": {
-                "type": "array",
-                "items": {
-                    "type": "object",
-                    "properties": {
-                        "field": {"type": "string"},
-                        "value": {"type": "string"},
-                    },
-                    "required": ["field", "value"],
-                    "additionalProperties": False,
-                },
-            },
-            "notes": {"type": "string"},
-        },
-        "required": ["sentence", "values", "notes"],
-        "additionalProperties": False,
-    }
-
-    described = "\n".join(f"- {item.name} ({item.type})" for item in profile.fields)
-    payload = judge.ask_json(
-        system=_SCENARIO_SYSTEM,
-        prompt=(
-            f"Use case: {profile.use_case}\n"
-            f"What the agent does: {profile.summary}\n"
-            f"Language: {language}\n\n"
-            f"Fields the speech-to-text must capture:\n{described}\n\n"
-            "Write one sentence a caller would plausibly say that contains a "
-            "concrete, testable value for every field above. In `notes`, say in "
-            "one sentence which parts you expect to be hardest to transcribe."
-        ),
-        schema=schema,
-    )
-
-    expected = {
-        str(entry.get("field", "")).strip(): str(entry.get("value", "")).strip()
-        for entry in payload.get("values", [])
-        if str(entry.get("field", "")).strip()
-    }
-    return TestScenario(
-        sentence=str(payload.get("sentence", "")).strip(),
-        expected=expected,
-        notes=str(payload.get("notes", "")).strip(),
-    )
-
-
-# -- scoring ---------------------------------------------------------------
-
-#: How the headline use-case score is composed. Exposed so the UI can show it —
-#: a single percentage nobody can decompose is not worth reporting.
-SCORE_WEIGHTS = {
-    "critical_fields": 0.60,
-    "semantic_match": 0.25,
-    "wer": 0.15,
-}
-
-WEIGHT_RATIONALE = {
-    "critical_fields": (
-        "Weighted highest because these are the values the agent exists to "
-        "collect — losing one is a failed call regardless of the rest."
-    ),
-    "semantic_match": (
-        "Catches meaning changes outside the named fields, such as a flipped "
-        "negation in the surrounding sentence."
-    ),
-    "wer": (
-        "Kept as a minority weight so a provider that mangles everything else "
-        "cannot score well on fields alone. Contributes as 1 - WER."
-    ),
-}
+from .metric_selector import (  # noqa: F401 - re-exported as the layer's API
+    DERIVED_LABELS,
+    TIER_RATIONALE,
+    TIER_WEIGHTS,
+    MetricPlan,
+    Selection,
+    apply_default_weights,
+    select,
+    set_weights,
+)
+from .metrics.use_case_metrics import category_scores
+from .prompt_analyzer import analyze  # noqa: F401
+from .requirement_extractor import (  # noqa: F401
+    FIELD_TYPES,
+    CriticalField,
+    Requirements,
+)
+from .scenario_generator import SCENARIO_TYPES, TestScenario, generate  # noqa: F401
+from .store import StoredResult
 
 
 @dataclass
@@ -336,31 +46,206 @@ class UseCaseScore:
     def percent(self) -> float:
         return self.score * 100.0
 
+    @property
+    def complete(self) -> bool:
+        return not self.missing
 
-def score(metric_values: dict[str, float | None]) -> UseCaseScore:
-    """Combine the weighted metrics into one number, skipping any that are absent.
 
-    Weights are renormalised over the metrics that actually ran, so a run
-    without the judge still produces a score rather than silently deflating it.
+def metric_values(result: StoredResult) -> dict[str, float]:
+    """Every metric this result can contribute, as an accuracy in 0..1.
+
+    Error rates are inverted so that higher always means better, and the derived
+    accuracy metrics are rolled up from the per-field verdicts that
+    `critical_fields` already produced — no extra judge calls.
     """
+    values: dict[str, float] = {}
+
+    for key in ("wer", "cer", "semantic_wer", "llm_wer", "llm_cer"):
+        value = result.metric_value(key)
+        if value is not None:
+            values[key] = max(0.0, 1.0 - value)
+
+    for key in ("semantic_match", "intent_entity", "critical_fields"):
+        value = result.metric_value(key)
+        if value is not None:
+            values[key] = value
+
+    per_field = result.metric_extra("critical_fields").get("fields", {})
+    values.update(category_scores(per_field))
+    return values
+
+
+def score(plan: MetricPlan, result: StoredResult) -> UseCaseScore:
+    """Weighted score over the metrics this plan selected.
+
+    Weights are renormalised across the metrics that actually produced a value,
+    so a judge failure lowers confidence rather than silently deflating the
+    score — and `missing` names what did not run so the UI can say so.
+    """
+    available = metric_values(result)
     parts: dict[str, tuple[float, float]] = {}
     missing: list[str] = []
-    total_weight = 0.0
     total = 0.0
+    total_weight = 0.0
 
-    for metric, weight in SCORE_WEIGHTS.items():
-        value = metric_values.get(metric)
-        if value is None:
-            missing.append(metric)
+    for selection in plan.selections:
+        if selection.weight <= 0:
             continue
-        # WER is an error rate; everything else is already an accuracy.
-        contribution = max(0.0, 1.0 - value) if metric in {"wer", "cer"} else value
-        parts[metric] = (contribution, weight)
-        total += contribution * weight
-        total_weight += weight
+        value = available.get(selection.metric)
+        if value is None:
+            missing.append(selection.metric)
+            continue
+        parts[selection.metric] = (value, selection.weight)
+        total += value * selection.weight
+        total_weight += selection.weight
 
     return UseCaseScore(
         score=(total / total_weight) if total_weight else 0.0,
         parts=parts,
         missing=missing,
     )
+
+
+def comparison_table(
+    plan: MetricPlan, results: list[StoredResult]
+) -> tuple[list[str], list[dict]]:
+    """One row per metric, one column per provider — the PRD's comparison view."""
+    providers = [result.provider for result in results]
+    scores = {result.provider: score(plan, result) for result in results}
+    values = {result.provider: metric_values(result) for result in results}
+
+    rows: list[dict] = [
+        {
+            "Metric": "Use-case score",
+            **{
+                provider: f"{scores[provider].percent:.0f}%" for provider in providers
+            },
+        }
+    ]
+
+    for selection in plan.selections:
+        row = {"Metric": f"{selection.label} ({selection.tier.lower()})"}
+        for provider in providers:
+            value = values[provider].get(selection.metric)
+            row[provider] = f"{value:.0%}" if value is not None else "—"
+        rows.append(row)
+
+    for label, key in (("p95 latency", "latency"), ("Estimated cost", "cost")):
+        row = {"Metric": label}
+        for result in results:
+            if key == "latency":
+                row[result.provider] = (
+                    f"{result.latency_seconds:.2f}s" if result.latency_seconds else "—"
+                )
+            else:
+                from .costs import rate_for
+
+                row[result.provider] = (
+                    f"${(result.duration_seconds / 60.0) * rate_for(result.provider):.5f}"
+                )
+        rows.append(row)
+
+    return providers, rows
+
+
+@dataclass
+class Verdict:
+    winner: str | None
+    explanation: str
+    runner_up: str | None = None
+
+
+def explain_winner(
+    plan: MetricPlan,
+    results: list[StoredResult],
+    *,
+    use_case: str = "this use case",
+    labels: dict[str, str] | None = None,
+) -> Verdict:
+    """Say which provider to use, and why — in the agent's terms, not WER's.
+
+    Deliberately deterministic rather than another LLM call: the facts it cites
+    (which fields were lost, which provider had lower WER) are already known, and
+    an explanation that can disagree with the numbers beside it is worse than
+    none.
+    """
+    usable = [result for result in results if result.ok]
+    if not usable:
+        return Verdict(winner=None, explanation="No provider produced a transcript.")
+
+    def name(provider: str) -> str:
+        return (labels or {}).get(provider, provider)
+
+    ranked = sorted(usable, key=lambda item: score(plan, item).score, reverse=True)
+    best = ranked[0]
+    best_score = score(plan, best)
+    lost = _lost_fields(best)
+
+    lines = [
+        f"**{name(best.provider)}** is recommended for {use_case}, "
+        f"scoring {best_score.percent:.0f}%."
+    ]
+
+    if len(ranked) > 1:
+        second = ranked[1]
+        second_score = score(plan, second)
+        best_wer = best.metric_value("wer")
+        second_wer = second.metric_value("wer")
+        second_lost = _lost_fields(second)
+
+        # The interesting case, and the reason this whole mode exists: the
+        # winner on use-case terms is not the winner on WER.
+        if (
+            best_wer is not None
+            and second_wer is not None
+            and best_wer > second_wer
+            and second_lost
+        ):
+            lines.append(
+                f"It had a *higher* word error rate than {name(second.provider)} "
+                f"({best_wer:.1%} against {second_wer:.1%}), but "
+                f"{name(second.provider)} lost {_join(second_lost)}, which for this "
+                "agent is a failed interaction rather than a wording difference."
+            )
+        elif second_lost:
+            lines.append(
+                f"{name(second.provider)} scored {second_score.percent:.0f}% and lost "
+                f"{_join(second_lost)}."
+            )
+        else:
+            lines.append(
+                f"{name(second.provider)} was close behind at "
+                f"{second_score.percent:.0f}% with every critical value intact; "
+                "either would serve, so pick on latency or cost."
+            )
+
+    if lost:
+        lines.append(
+            f"Note that even {name(best.provider)} did not capture {_join(lost)} — "
+            "check whether that field is tolerable to lose before deploying."
+        )
+
+    failed = [name(result.provider) for result in results if not result.ok]
+    if failed:
+        lines.append(
+            f"{_join(failed)} failed to transcribe and could not be compared."
+        )
+
+    return Verdict(
+        winner=best.provider,
+        runner_up=ranked[1].provider if len(ranked) > 1 else None,
+        explanation=" ".join(lines),
+    )
+
+
+def _lost_fields(result: StoredResult) -> list[str]:
+    per_field = result.metric_extra("critical_fields").get("fields", {})
+    return [name for name, verdict in per_field.items() if not verdict.get("preserved")]
+
+
+def _join(names: list[str]) -> str:
+    if not names:
+        return "nothing"
+    if len(names) == 1:
+        return f"**{names[0]}**"
+    return ", ".join(f"**{name}**" for name in names[:-1]) + f" and **{names[-1]}**"

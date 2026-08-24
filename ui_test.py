@@ -73,9 +73,12 @@ def main() -> int:
     # second exercises the recommendation and scenario rendering.
     from stt_eval import usecase
 
-    profile = usecase.UseCaseProfile(
+    profile = usecase.Requirements(
         use_case="Logistics",
+        objective="Collect delivery details.",
         summary="Collects delivery details.",
+        critical_action="Capture the delivery request accurately",
+        user_actions=["State the order number and delivery date"],
         fields=[
             usecase.CriticalField("Order number", "identifier", "wrong record"),
             usecase.CriticalField("Delivery date", "date", "wrong day"),
@@ -83,12 +86,20 @@ def main() -> int:
     )
     scenario = usecase.TestScenario(
         sentence="My order number is 45821, deliver on August 25th.",
+        scenario_type="number",
         expected={"Order number": "45821", "Delivery date": "August 25th"},
         notes="The order number is the hard part.",
     )
     for label, state in (
         ("prompt mode, empty", {}),
-        ("prompt mode, analysed", {"usecase_profile": profile, "usecase_scenario": scenario}),
+        (
+            "prompt mode, analysed",
+            {
+                "usecase_profile": profile,
+                "metric_plan": usecase.select(profile),
+                "usecase_scenario": scenario,
+            },
+        ),
     ):
         app = AppTest.from_file("app.py", default_timeout=60)
         app.session_state["mode"] = "Prompt-Based Evaluation"

@@ -19,14 +19,10 @@ from ..prompts import JUDGE_SYSTEM_PROMPT
 from .base import MetricValue
 from .wer import DeterministicScores
 
-#: Field types that roll up into each category metric.
-CATEGORY_TYPES = {
-    "number_accuracy": ("number", "identifier", "quantity"),
-    "date_accuracy": ("date", "time"),
-    "location_accuracy": ("location",),
-    "name_accuracy": ("name",),
-    "entity_accuracy": ("other",),
-}
+#: Field types that roll up into each category metric. Imported rather than
+#: redefined: two copies of this mapping would drift, and the categories shown
+#: to the user would stop matching the metrics recommended to them.
+from ..requirement_extractor import TYPE_GROUPS as CATEGORY_TYPES  # noqa: E402
 
 
 def critical_fields(

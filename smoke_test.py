@@ -250,61 +250,127 @@ def main() -> int:
 
     print("use-case layer")
     from stt_eval import usecase
-    from stt_eval.metrics import usecase_metrics
+    from stt_eval.metrics import use_case_metrics
 
-    profile = usecase.UseCaseProfile(
+    from stt_eval.store import StoredResult as SRes
+
+    profile = usecase.Requirements(
         use_case="Logistics",
         summary="Collects delivery details.",
         fields=[
             usecase.CriticalField("Order number", "identifier"),
-            usecase.CriticalField("Quantity", "number"),
+            usecase.CriticalField("Quantity", "quantity"),
             usecase.CriticalField("Delivery date", "date"),
             usecase.CriticalField("Location", "location"),
         ],
     )
-    recommended = {item.metric for item in usecase.recommend_metrics(profile)}
-    check("WER and CER always recommended", {"wer", "cer"} <= recommended)
-    check("critical fields metric recommended", "critical_fields" in recommended)
-    check("number accuracy driven by identifier/quantity", "number_accuracy" in recommended)
-    check("date accuracy driven by the date field", "date_accuracy" in recommended)
-    check("location accuracy driven by the location field", "location_accuracy" in recommended)
-    check(
-        "no name metric without a name field",
-        "name_accuracy" not in recommended,
-    )
-    reasons = {item.metric: item.reason for item in usecase.recommend_metrics(profile)}
-    check("every recommendation carries a reason", all(reasons.values()))
+    plan = usecase.select(profile)
+    selected = {item.metric for item in plan.selections}
+    check("WER and CER always selected", {"wer", "cer"} <= selected)
+    check("critical fields metric selected", "critical_fields" in selected)
+    check("identifier accuracy driven by the order number", "identifier_accuracy" in selected)
+    check("number accuracy driven by the quantity", "number_accuracy" in selected)
+    check("date accuracy driven by the date field", "date_accuracy" in selected)
+    check("location accuracy driven by the location field", "location_accuracy" in selected)
+    check("no name metric without a name field", "name_accuracy" not in selected)
+
+    tiers = {item.metric: item.tier for item in plan.selections}
+    check("field accuracy is PRIMARY", tiers["date_accuracy"] == "PRIMARY")
+    check("WER is BASELINE", tiers["wer"] == "BASELINE")
+    check("semantic match is SECONDARY", tiers["semantic_match"] == "SECONDARY")
+    check("every selection carries a reason", all(item.reason for item in plan.selections))
     check(
         "field-driven reasons name the fields that drove them",
-        "Order number" in reasons["number_accuracy"],
+        "Order number" in {item.metric: item.reason for item in plan.selections}["identifier_accuracy"],
+    )
+    check("weights sum to one", abs(sum(item.weight for item in plan.selections) - 1.0) < 1e-9)
+    check(
+        "primary tier carries the largest share",
+        sum(item.weight for item in plan.by_tier("PRIMARY"))
+        > sum(item.weight for item in plan.by_tier("BASELINE")),
+    )
+    check(
+        "derived metrics are not sent to the runner",
+        "date_accuracy" not in plan.runnable_metrics
+        and "critical_fields" in plan.runnable_metrics,
     )
 
-    # A prompt with no data collection should recommend baselines only.
-    bare = usecase.UseCaseProfile(use_case="Chit-chat", summary="Small talk.", fields=[])
+    usecase.set_weights(plan, {"wer": 0.9})
+    check("user weights renormalise to one", abs(sum(i.weight for i in plan.selections) - 1.0) < 1e-9)
+    usecase.apply_default_weights(plan)
+
+    # A prompt with no data collection selects baselines and meaning only.
+    bare = usecase.Requirements(use_case="Chit-chat", summary="Small talk.", fields=[])
+    bare_plan = usecase.select(bare)
     check(
-        "a prompt collecting nothing recommends only baselines",
-        {item.metric for item in usecase.recommend_metrics(bare)} == set(usecase.BASELINE_METRICS),
+        "a prompt collecting nothing has no PRIMARY field metrics",
+        not [i for i in bare_plan.by_tier("PRIMARY") if i.metric.endswith("_accuracy")],
     )
 
     per_field = {
         "Order number": {"preserved": True, "type": "identifier"},
-        "Quantity": {"preserved": True, "type": "number"},
+        "Quantity": {"preserved": True, "type": "quantity"},
         "Delivery date": {"preserved": False, "type": "date"},
         "Location": {"preserved": True, "type": "location"},
     }
-    categories = usecase_metrics.category_scores(per_field)
-    check("number accuracy rolls up both numeric fields", categories["number_accuracy"] == 1.0)
+    categories = use_case_metrics.category_scores(per_field)
+    check("identifier accuracy rolled up", categories["identifier_accuracy"] == 1.0)
     check("date accuracy reflects the lost date", categories["date_accuracy"] == 0.0)
     check("location accuracy computed", categories["location_accuracy"] == 1.0)
     check("absent categories are omitted", "name_accuracy" not in categories)
 
-    combined = usecase.score({"critical_fields": 0.75, "semantic_match": 1.0, "wer": 0.10})
-    expected = 0.75 * 0.60 + 1.0 * 0.25 + 0.90 * 0.15
-    check("use-case score is the stated weighting", abs(combined.score - expected) < 1e-9)
-    check("score exposes its parts", set(combined.parts) == {"critical_fields", "semantic_match", "wer"})
-    partial = usecase.score({"critical_fields": 1.0, "semantic_match": None, "wer": None})
-    check("weights renormalise over what ran", abs(partial.score - 1.0) < 1e-9)
-    check("missing metrics are named", partial.missing == ["semantic_match", "wer"])
+    good = SRes(
+        run_id="x", clip_id="c", provider="alpha", status="ok",
+        metrics={
+            "wer": {"value": 0.30},
+            "cer": {"value": 0.20},
+            "semantic_match": {"value": 1.0},
+            "intent_entity": {"value": 1.0},
+            "critical_fields": {"value": 1.0, "extra": {"fields": {
+                name: {**verdict, "preserved": True} for name, verdict in per_field.items()
+            }}},
+        },
+    )
+    sloppy = SRes(
+        run_id="x", clip_id="c", provider="beta", status="ok",
+        metrics={
+            "wer": {"value": 0.10},  # better WER...
+            "cer": {"value": 0.08},
+            "semantic_match": {"value": 0.0},
+            "intent_entity": {"value": 0.5},
+            "critical_fields": {"value": 0.5, "extra": {"fields": per_field}},  # ...lost a field
+        },
+    )
+    good_score = usecase.score(plan, good)
+    sloppy_score = usecase.score(plan, sloppy)
+    check("a run preserving every field scores higher", good_score.score > sloppy_score.score)
+    check("score is complete when every metric ran", good_score.complete)
+    check("score exposes its parts", "wer" in good_score.parts)
+
+    verdict = usecase.explain_winner(plan, [good, sloppy], use_case="logistics")
+    check("the field-preserving provider wins despite worse WER", verdict.winner == "alpha")
+    check(
+        "the explanation says WER was higher",
+        "higher" in verdict.explanation and "word error rate" in verdict.explanation,
+    )
+    check("the explanation names the lost field", "Delivery date" in verdict.explanation)
+
+    providers, rows = usecase.comparison_table(plan, [good, sloppy])
+    check("comparison table covers both providers", providers == ["alpha", "beta"])
+    check("comparison table leads with the use-case score", rows[0]["Metric"] == "Use-case score")
+    check("comparison table includes latency and cost", {r["Metric"] for r in rows} >= {"p95 latency", "Estimated cost"})
+
+    missing_fields = SRes(
+        run_id="x", clip_id="c", provider="gamma", status="ok",
+        metrics={"wer": {"value": 0.1}, "cer": {"value": 0.1}},
+    )
+    partial = usecase.score(plan, missing_fields)
+    check("weights renormalise over what ran", partial.score > 0)
+    check("missing metrics are named", not partial.complete and "semantic_match" in partial.missing)
+
+    check("scenario types cover the PRD list", set(usecase.SCENARIO_TYPES) >= {
+        "normal", "number", "datetime", "entity", "semantic", "critical"
+    })
 
     print("csv parsing")
     mapping, errors = parse_ground_truth_csv(

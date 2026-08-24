@@ -34,6 +34,12 @@ from stt_eval.providers import provider_label
 from stt_eval.runner import RunConfig, Runner
 from stt_eval.store import ResultStore
 
+# Transcripts contain whatever the speaker said — "₹500", Devanagari, emoji.
+# The default Windows console is cp1252 and raises on any of it, so the test
+# would fail on its own output rather than on a real defect.
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+
 RUN_ID = "featuretest"
 
 # Sentences chosen to exercise the metrics ladder: numbers that recognisers
