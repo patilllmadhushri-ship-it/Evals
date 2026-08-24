@@ -912,23 +912,65 @@ def step_upload() -> None:
                 )
             else:
                 st.caption(f"{preview.get('seconds', 0):.1f}s of audio")
+                def commit(text: str) -> None:
+                    """Take this text as the ground truth and move the run on.
+
+                    One click does the lot — save the transcript, add the clip,
+                    validate — because doing it in three separate steps meant
+                    scrolling past controls a recorded clip never needs.
+                    """
+                    st.session_state.inline_ground_truth = {
+                        **(st.session_state.inline_ground_truth or {}),
+                        clean_id: text.strip(),
+                    }
+                    st.session_state.recorded_audio = recorded + [
+                        (f"{clean_id}.wav", recording.getvalue())
+                    ]
+                    st.session_state.clip_languages = {
+                        **(st.session_state.clip_languages or {}),
+                        clean_id: st.session_state.language,
+                    }
+                    st.session_state.mic_round += 1
+                    st.session_state.mic_preview = {}
+                    st.session_state.mic_chosen_text = ""
+
+                    all_audio = list(st.session_state.uploaded_audio or []) + list(
+                        st.session_state.recorded_audio
+                    )
+                    dataset = build_dataset(
+                        all_audio,
+                        {
+                            key: value
+                            for key, value in st.session_state.inline_ground_truth.items()
+                            if value.strip()
+                        },
+                        ground_truth_source="the transcripts you typed",
+                        sample_rate=st.session_state.sample_rate,
+                        languages=st.session_state.clip_languages,
+                    )
+                    st.session_state.dataset = dataset
+                    goto(1 if dataset.is_runnable else 0)
+
                 for provider_key in chosen_providers:
                     outcome = by_provider.get(provider_key, {})
                     with st.container(border=True):
-                        row = st.columns([3, 1])
+                        row = st.columns([3, 1, 2])
                         row[0].markdown(f"**{provider_label(provider_key)}**")
                         if outcome.get("error"):
                             st.error(outcome["error"])
                             continue
                         row[1].caption(f"{outcome.get('latency', 0):.2f}s")
-                        st.write(outcome.get("text") or "_(returned nothing)_")
-                        if st.button(
-                            "Use this as ground truth",
+                        text = (outcome.get("text") or "").strip()
+                        if row[2].button(
+                            "Use this & continue →",
                             key=f"use_{provider_key}_{st.session_state.mic_round}",
-                            disabled=not (outcome.get("text") or "").strip(),
+                            disabled=not text or not clean_id or duplicate,
+                            width="stretch",
+                            help="Takes this transcript as the ground truth, adds the "
+                            "clip and goes straight to Configure.",
                         ):
-                            st.session_state.mic_chosen_text = outcome.get("text", "")
-                            st.rerun()
+                            commit(text)
+                        st.write(outcome.get("text") or "_(returned nothing)_")
 
                 texts = [
                     (outcome.get("text") or "").strip()
@@ -941,54 +983,31 @@ def step_upload() -> None:
                         "kind of clip worth having in your dataset."
                     )
 
-            st.markdown("**Ground truth for this clip**")
+            st.markdown("**Or correct it first**")
             draft = st.text_area(
                 "Ground truth",
                 value=st.session_state.mic_chosen_text,
-                placeholder="Correct the transcript above, or type what you actually said",
-                height=110,
+                placeholder="Type what you actually said, or fix a transcript above",
+                height=90,
                 key=f"mic_draft_{st.session_state.mic_round}",
                 label_visibility="collapsed",
             )
-
-            # Save as you type. Requiring a button press here meant a typed
-            # transcript silently failed validation later, which looked like
-            # the app losing the text rather than never having taken it.
-            if clean_id and (draft or "").strip():
-                st.session_state.inline_ground_truth = {
-                    **(st.session_state.inline_ground_truth or {}),
-                    clean_id: draft.strip(),
-                }
-                st.caption(f"Saved as the ground truth for `{clean_id}`.")
-
-            actions = st.columns([1, 1])
-            with actions[0]:
-                if st.button(
-                    "Add recording to dataset",
-                    type="primary",
-                    disabled=recording is None or not clean_id or duplicate,
-                    width="stretch",
-                ):
-                    st.session_state.recorded_audio = recorded + [
-                        (f"{clean_id}.wav", recording.getvalue())
-                    ]
-                    # Tag the clip with the language it was recorded in, so a
-                    # mixed-language dataset transcribes each clip correctly.
-                    st.session_state.clip_languages = {
-                        **(st.session_state.clip_languages or {}),
-                        clean_id: st.session_state.language,
-                    }
-                    # Bump the widget keys so the recorder resets for the next clip.
-                    st.session_state.mic_round += 1
-                    st.session_state.mic_preview = {}
-                    st.session_state.mic_chosen_text = ""
-                    st.rerun()
+            if st.button(
+                "Use this text & continue →",
+                type="primary",
+                disabled=not (draft or "").strip()
+                or recording is None
+                or not clean_id
+                or duplicate,
+                width="stretch",
+            ):
+                commit(draft)
 
             st.caption(
-                "⚠️ A transcript used as its own ground truth scores near-zero error "
-                "for that provider by construction, which makes the comparison "
-                "meaningless. Correct every mistake above first — that correction "
-                "*is* the ground truth."
+                "⚠️ An uncorrected provider transcript used as its own ground truth "
+                "scores near-zero error for that provider by construction. Fine for "
+                "a quick look; correct it first if the comparison has to mean "
+                "something."
             )
 
         if recorded:
