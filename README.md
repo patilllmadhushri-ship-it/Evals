@@ -114,6 +114,34 @@ smoke_test.py               Offline end-to-end check (no keys, no network)
 ui_test.py                  Headless render check for all six steps
 ```
 
+## Deploying
+
+The app runs anywhere Streamlit does. Locally it reads keys from `.env`; on a
+host there is no `.env`, so it falls back to Streamlit secrets — precedence is
+exported environment variable, then `.env`, then secrets.
+
+**Streamlit Community Cloud:** point it at this repo with `app.py` as the entry
+point, then paste your keys into *Settings → Secrets* using
+[`.streamlit/secrets.toml.example`](.streamlit/secrets.toml.example) as the
+template. Nothing else is required — `requirements.txt` and
+`.streamlit/config.toml` are already in the repo.
+
+**Anywhere else** (a VM, a container, Cloud Run): `pip install -r
+requirements.txt` and run
+
+```bash
+streamlit run app.py --server.port $PORT --server.address 0.0.0.0
+```
+
+with the same variable names exported as environment variables.
+
+> ⚠️ **A deployed instance spends your API credits.** Anyone who can reach the
+> URL can transcribe audio and run judge calls against your keys, and the
+> Prompt-Based mode makes that a single click. Put it behind authentication, or
+> deploy it privately, before sharing a link. `ffmpeg` on the host also widens
+> the accepted upload formats — without it, MP3/M4A support depends on the
+> host's libsndfile build.
+
 ## Tests
 
 ```bash

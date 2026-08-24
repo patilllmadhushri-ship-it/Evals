@@ -1,0 +1,12 @@
+# Server settings that apply both locally and on a host.
+
+[server]
+# Recordings and audio uploads are the largest thing this app handles.
+maxUploadSize = 200
+headless = true
+
+[browser]
+gatherUsageStats = false
+
+[theme]
+base = "dark"
