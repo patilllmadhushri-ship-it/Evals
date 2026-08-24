@@ -86,6 +86,12 @@ class StoredResult:
         entry = self.metrics.get(key) or {}
         return entry.get("error")
 
+    def metric_extra(self, key: str) -> dict:
+        """Structured detail a metric kept beside its score — per-field verdicts,
+        for instance. Empty for metrics that record none."""
+        entry = self.metrics.get(key) or {}
+        return entry.get("extra") or {}
+
 
 class ResultStore:
     """Thread-safe, process-local SQLite store."""

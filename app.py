@@ -51,9 +51,10 @@ def _reload_local_modules() -> None:
 
 _reload_local_modules()
 
-from stt_eval import costs, env, export, report
+from stt_eval import costs, env, export, report, usecase
 from stt_eval import signals as signals_module
 from stt_eval import streaming
+from stt_eval.metrics import usecase_metrics
 from stt_eval.config import (
     CHARACTER_ORIENTED_LANGUAGES,
     DEFAULT_CONCURRENCY,
@@ -136,6 +137,14 @@ def init_state() -> None:
         "mic_chosen_text": "",
         "input_source": "🎤 Microphone",
         "clip_languages": {},
+        "mode": "Dataset Evaluation",
+        "agent_prompt": "",
+        "usecase_profile": None,
+        "usecase_scenario": None,
+        "prompt_providers": [],
+        "prompt_results": [],
+        "prompt_metrics": [],
+        "prompt_run_id": "",
         "ground_truth_map": {},
         "ground_truth_source": "ground_truth.csv",
     }
@@ -167,12 +176,380 @@ def uses_judge() -> bool:
     return any(key in LLM_KEYS for key in enabled_metrics())
 
 
+def build_configured_judge():
+    """The judge the user configured in step 3, or None if no key is set."""
+    backend = st.session_state.judge_backend
+    key = st.session_state.judge_key or env.judge_key(backend)
+    if not key:
+        return None
+    model = st.session_state.judge_model
+    if backend == "openrouter" and model in JUDGE_MODELS:
+        model = OPENROUTER_MODELS[0]  # an Anthropic model id would not resolve
+    return create_judge(
+        backend=backend, api_key=key, model=model, effort=st.session_state.judge_effort
+    )
+
+
+# --------------------------------------------------------------------------
+# Prompt-Based Evaluation
+#
+# A separate page over the same engine: the providers, metric registry, judge,
+# runner, store and export are all the existing ones. What this adds is the
+# layer in front — read the agent's system prompt, work out what its speech-to-
+# text must capture, and test exactly that.
+# --------------------------------------------------------------------------
+
+
+def prompt_page() -> None:
+    st.header("Prompt-Based Evaluation")
+    st.write(
+        "Paste the system prompt of the voice agent you are evaluating. The app "
+        "works out the use case and the values its speech-to-text must capture, "
+        "picks the metrics that matter for them, writes a sentence that tests "
+        "them, and scores what the providers heard."
+    )
+
+    judge = None
+    try:
+        judge = build_configured_judge()
+    except JudgeError as exc:
+        st.error(str(exc))
+    if judge is None:
+        st.warning(
+            "This mode needs an LLM judge — it reads the prompt, writes the test "
+            "sentence and checks the fields. Set `ANTHROPIC_API_KEY` or "
+            "`OPENROUTER_API_KEY` in `.env`, or configure one in Dataset "
+            "Evaluation → step 3."
+        )
+        return
+    st.caption(f"Judge: `{judge.model}` via {judge.backend}")
+
+    # -- 1. system prompt ---------------------------------------------------
+    st.subheader("1 · System prompt")
+    st.session_state.agent_prompt = st.text_area(
+        "The voice agent's system prompt",
+        value=st.session_state.agent_prompt,
+        height=160,
+        placeholder=(
+            "You are a logistics assistant. Collect the customer's delivery "
+            "location, order number, quantity and preferred delivery date."
+        ),
+        label_visibility="collapsed",
+    )
+
+    if st.button("Analyse prompt", type="primary", disabled=not st.session_state.agent_prompt.strip()):
+        try:
+            with st.spinner("Reading the prompt…"):
+                profile = usecase.extract_requirements(judge, st.session_state.agent_prompt)
+            st.session_state.usecase_profile = profile
+            st.session_state.usecase_scenario = None
+            st.session_state.prompt_results = []
+        except JudgeError as exc:
+            st.error(str(exc))
+        st.rerun()
+
+    profile = st.session_state.usecase_profile
+    if profile is None:
+        return
+
+    # -- 2. what the prompt requires ---------------------------------------
+    st.subheader("2 · What this agent needs from its STT")
+    top = st.columns([1, 2])
+    with top[0]:
+        st.metric("Detected use case", profile.use_case)
+    with top[1]:
+        st.caption(profile.summary)
+
+    fields_column, metrics_column = st.columns(2)
+    with fields_column:
+        st.markdown("**Critical information**")
+        for item in profile.fields:
+            st.markdown(f"- **{item.name}** · `{item.type}`")
+            if item.why:
+                st.caption(f"  {item.why}")
+        if not profile.fields:
+            st.info("No critical fields were found — this prompt may not collect data.")
+
+    recommendations = usecase.recommend_metrics(profile)
+    with metrics_column:
+        st.markdown("**Recommended metrics**")
+        for recommendation in recommendations:
+            label = METRICS_BY_KEY[recommendation.metric].label if recommendation.metric in METRICS_BY_KEY else recommendation.metric.replace("_", " ").title()
+            st.markdown(f"- ✓ **{label}**")
+            st.caption(f"  Why: {recommendation.reason}")
+
+    if not profile.fields:
+        return
+
+    # -- 3. test scenario ---------------------------------------------------
+    st.subheader("3 · Test scenario")
+    if st.button("Generate a sentence that tests these fields"):
+        try:
+            with st.spinner("Writing a test sentence…"):
+                st.session_state.usecase_scenario = usecase.generate_scenario(
+                    judge, profile, language=st.session_state.language
+                )
+        except JudgeError as exc:
+            st.error(str(exc))
+        st.rerun()
+
+    scenario = st.session_state.usecase_scenario
+    if scenario is None:
+        st.caption("Generate one, or skip ahead and read your own sentence.")
+        return
+
+    st.success(f"### “{scenario.sentence}”")
+    if scenario.expected:
+        st.caption(
+            "Values under test — "
+            + " · ".join(f"**{name}**: {value}" for name, value in scenario.expected.items())
+        )
+    if scenario.notes:
+        st.caption(scenario.notes)
+
+    edited = st.text_area(
+        "Read this aloud (edit if you want to say something else)",
+        value=scenario.sentence,
+        height=80,
+        key="scenario_text",
+    )
+
+    # -- 4. record ----------------------------------------------------------
+    st.subheader("4 · Read it into the microphone")
+    recording = st.audio_input("Record", key=f"prompt_mic_{st.session_state.mic_round}")
+
+    # -- 5. providers -------------------------------------------------------
+    st.subheader("5 · Providers")
+    language = st.session_state.language
+    available = [
+        key for key in providers_for_language(language) if key in env.configured_providers()
+    ]
+    if not available:
+        st.warning("No provider keys found in `.env` for this language.")
+        return
+    chosen = st.multiselect(
+        "Compare",
+        available,
+        default=[key for key in st.session_state.prompt_providers if key in available] or available[:3],
+        format_func=provider_label,
+    )
+    st.session_state.prompt_providers = chosen
+
+    # -- 6. evaluate --------------------------------------------------------
+    st.subheader("6 · Evaluate")
+    if st.button(
+        "Transcribe and score",
+        type="primary",
+        disabled=recording is None or not chosen,
+    ):
+        metrics = [r.metric for r in recommendations if r.metric in METRICS_BY_KEY]
+        run_id = f"prompt-{uuid.uuid4().hex[:8]}"
+        try:
+            with st.spinner("Transcribing and scoring…"):
+                dataset = build_dataset(
+                    [("utterance.wav", recording.getvalue())],
+                    {"utterance": edited.strip()},
+                    ground_truth_source="the generated test sentence",
+                    sample_rate=st.session_state.sample_rate,
+                )
+                if not dataset.is_runnable:
+                    for message in dataset.errors:
+                        st.error(message)
+                    return
+                runner = Runner(
+                    config=RunConfig(
+                        run_id=run_id,
+                        language=language,
+                        provider_keys=chosen,
+                        api_keys={key: env.provider_key(key) for key in chosen},
+                        enabled_metrics=metrics,
+                        per_provider_concurrency=len(chosen),
+                        judge_concurrency=st.session_state.judge_concurrency,
+                        metric_context={
+                            "fields": [
+                                {"name": item.name, "type": item.type} for item in profile.fields
+                            ],
+                            "expected": scenario.expected,
+                        },
+                    ),
+                    dataset=dataset,
+                    store=store,
+                    judge=judge,
+                )
+                runner.start()
+                runner._thread.join(timeout=600)  # noqa: SLF001 - page waits on its own run
+            st.session_state.prompt_run_id = run_id
+            st.session_state.prompt_results = store.load(run_id)
+            st.session_state.prompt_metrics = metrics
+        except Exception as exc:  # noqa: BLE001 - surfaced, never a crash
+            st.error(f"{type(exc).__name__}: {exc}")
+        st.rerun()
+
+    # -- 7. results ---------------------------------------------------------
+    results = st.session_state.prompt_results
+    if not results:
+        return
+
+    st.subheader("7 · Results")
+    st.caption(f"Said: “{results[0].ground_truth}”")
+
+    weights = usecase.SCORE_WEIGHTS
+    with st.expander("How the use-case score is weighted"):
+        for metric, weight in weights.items():
+            label = METRICS_BY_KEY[metric].label if metric in METRICS_BY_KEY else metric
+            st.markdown(f"- **{label}** — {weight:.0%}")
+            st.caption(f"  {usecase.WEIGHT_RATIONALE[metric]}")
+        st.caption(
+            "Weights are renormalised over whichever of these actually ran, so a "
+            "missing metric does not silently deflate the score."
+        )
+
+    metrics_used = st.session_state.prompt_metrics or []
+    summaries = report.summarize(results, enabled_metrics=metrics_used)
+
+    scored = []
+    for result in results:
+        values = {key: result.metric_value(key) for key in weights}
+        scored.append((usecase.score(values), result))
+    scored.sort(key=lambda pair: pair[0].score, reverse=True)
+
+    for use_case_score, result in scored:
+        with st.container(border=True):
+            head = st.columns([3, 1, 1, 1])
+            head[0].markdown(f"### {provider_label(result.provider)}")
+            head[1].metric("Use-case score", f"{use_case_score.percent:.0f}%")
+            head[2].metric(
+                "Latency",
+                f"{result.latency_seconds:.2f}s" if result.latency_seconds else "—",
+            )
+            rate = costs.rate_for(result.provider)
+            head[3].metric(
+                "Cost", f"${(result.duration_seconds / 60.0) * rate:.5f}"
+            )
+
+            if not result.ok:
+                st.error(result.error)
+                continue
+
+            # A score computed from a subset of its inputs must say so. Without
+            # this, a provider whose field check failed to run can rank below one
+            # that was actually judged worse, with nothing on screen to explain it.
+            if use_case_score.missing:
+                missing_labels = [
+                    METRICS_BY_KEY[key].label if key in METRICS_BY_KEY else key
+                    for key in use_case_score.missing
+                ]
+                st.warning(
+                    f"Scored on {len(use_case_score.parts)} of "
+                    f"{len(usecase.SCORE_WEIGHTS)} signals — "
+                    + ", ".join(missing_labels)
+                    + " did not run, so the weighting was renormalised over what "
+                    "did. Compare this score with care."
+                )
+
+            st.markdown("**Transcript**")
+            st.write(result.prediction or "_(nothing returned)_")
+
+            per_field = result.metric_extra("critical_fields").get("fields", {})
+            field_error = result.metric_error("critical_fields")
+            if field_error and not per_field:
+                st.error(f"Critical field check did not run: {field_error}")
+            if per_field:
+                st.markdown("**Critical information**")
+                for name, verdict in per_field.items():
+                    mark = "✓" if verdict.get("preserved") else "✗"
+                    heard = verdict.get("heard_as") or "nothing"
+                    st.markdown(
+                        f"{mark} **{name}**"
+                        + ("" if verdict.get("preserved") else f" — heard as “{heard}”")
+                    )
+                lost = [name for name, v in per_field.items() if not v.get("preserved")]
+                if lost:
+                    st.warning(
+                        "**Why:** the transcript preserved "
+                        + _join_names([n for n in per_field if n not in lost])
+                        + f", but {_join_names(lost)} "
+                        + ("was" if len(lost) == 1 else "were")
+                        + " not recognised correctly."
+                    )
+                else:
+                    st.success("**Why:** every value this agent needs survived transcription.")
+
+                categories = usecase_metrics.category_scores(per_field)
+                if categories:
+                    columns = st.columns(len(categories))
+                    for column, (metric, value) in zip(columns, categories.items()):
+                        column.metric(metric.replace("_", " ").title(), f"{value:.0%}")
+
+            numbers = st.columns(len(metrics_used) or 1)
+            for index, key in enumerate(metrics_used):
+                value = result.metric_value(key)
+                with numbers[index % len(numbers)]:
+                    st.metric(
+                        METRICS_BY_KEY[key].label if key in METRICS_BY_KEY else key,
+                        f"{value:.3f}" if value is not None else "—",
+                    )
+
+            reasons = [
+                (METRICS_BY_KEY[key].label, result.metric_reasoning(key))
+                for key in metrics_used
+                if key in METRICS_BY_KEY
+                and METRICS_BY_KEY[key].has_reasoning
+                and result.metric_reasoning(key)
+            ]
+            if reasons:
+                with st.expander("Judge reasoning"):
+                    for label, reasoning in reasons:
+                        st.markdown(f"**{label}** — {reasoning}")
+
+    per_clip = report.per_clip_rows(results, enabled_metrics=metrics_used)
+    st.download_button(
+        "⬇ Download these results (CSV)",
+        data=export.per_clip_csv(per_clip),
+        file_name=f"stt_prompt_eval_{st.session_state.prompt_run_id}.csv",
+        mime="text/csv",
+    )
+
+
+def _join_names(names: list[str]) -> str:
+    if not names:
+        return "nothing"
+    if len(names) == 1:
+        return f"**{names[0]}**"
+    return ", ".join(f"**{name}**" for name in names[:-1]) + f" and **{names[-1]}**"
+
+
 # --------------------------------------------------------------------------
 # Sidebar
 # --------------------------------------------------------------------------
 
 with st.sidebar:
     st.title("🎙️ STT Evaluation Studio")
+
+    st.session_state.mode = st.radio(
+        "Mode",
+        ["Dataset Evaluation", "Prompt-Based Evaluation"],
+        index=0 if st.session_state.mode == "Dataset Evaluation" else 1,
+        help=(
+            "Dataset: score providers on audio you already have. "
+            "Prompt-based: paste your voice agent's system prompt and test the "
+            "things that prompt actually depends on."
+        ),
+    )
+    st.divider()
+
+if st.session_state.mode == "Prompt-Based Evaluation":
+    with st.sidebar:
+        st.caption(
+            "Paste the system prompt of the agent you are evaluating. The app "
+            "works out what its speech-to-text has to get right, then tests "
+            "exactly that."
+        )
+        st.caption(f"Run id: `{st.session_state.run_id}`")
+    prompt_page()
+    st.stop()
+
+with st.sidebar:
     st.caption(
         "Upload your audio and the correct transcripts, run several providers "
         "over the same data, and see which one wins — on accuracy, meaning, "

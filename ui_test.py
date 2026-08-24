@@ -68,6 +68,40 @@ def main() -> int:
             headers = [item.value for item in app.header] or ["(no header)"]
             print(f"  PASS  step {step} ({name}) — {headers[0]}")
 
+    # The prompt-based page is a separate mode, so it needs its own render check.
+    # Two states matter: before a prompt has been analysed, and after — the
+    # second exercises the recommendation and scenario rendering.
+    from stt_eval import usecase
+
+    profile = usecase.UseCaseProfile(
+        use_case="Logistics",
+        summary="Collects delivery details.",
+        fields=[
+            usecase.CriticalField("Order number", "identifier", "wrong record"),
+            usecase.CriticalField("Delivery date", "date", "wrong day"),
+        ],
+    )
+    scenario = usecase.TestScenario(
+        sentence="My order number is 45821, deliver on August 25th.",
+        expected={"Order number": "45821", "Delivery date": "August 25th"},
+        notes="The order number is the hard part.",
+    )
+    for label, state in (
+        ("prompt mode, empty", {}),
+        ("prompt mode, analysed", {"usecase_profile": profile, "usecase_scenario": scenario}),
+    ):
+        app = AppTest.from_file("app.py", default_timeout=60)
+        app.session_state["mode"] = "Prompt-Based Evaluation"
+        app.session_state["agent_prompt"] = "You are a logistics assistant."
+        for key, value in state.items():
+            app.session_state[key] = value
+        app.run()
+        if app.exception:
+            failures += 1
+            print(f"  FAIL  {label}: {app.exception[0].value}")
+        else:
+            print(f"  PASS  {label}")
+
     ResultStore().delete_run(RUN_ID)
     print("\nAll steps rendered." if not failures else f"\n{failures} step(s) failed.")
     return 1 if failures else 0

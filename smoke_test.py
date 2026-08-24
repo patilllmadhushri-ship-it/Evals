@@ -248,6 +248,64 @@ def main() -> int:
     except streaming.StreamingUnsupported:
         check("non-streaming providers are rejected clearly", True)
 
+    print("use-case layer")
+    from stt_eval import usecase
+    from stt_eval.metrics import usecase_metrics
+
+    profile = usecase.UseCaseProfile(
+        use_case="Logistics",
+        summary="Collects delivery details.",
+        fields=[
+            usecase.CriticalField("Order number", "identifier"),
+            usecase.CriticalField("Quantity", "number"),
+            usecase.CriticalField("Delivery date", "date"),
+            usecase.CriticalField("Location", "location"),
+        ],
+    )
+    recommended = {item.metric for item in usecase.recommend_metrics(profile)}
+    check("WER and CER always recommended", {"wer", "cer"} <= recommended)
+    check("critical fields metric recommended", "critical_fields" in recommended)
+    check("number accuracy driven by identifier/quantity", "number_accuracy" in recommended)
+    check("date accuracy driven by the date field", "date_accuracy" in recommended)
+    check("location accuracy driven by the location field", "location_accuracy" in recommended)
+    check(
+        "no name metric without a name field",
+        "name_accuracy" not in recommended,
+    )
+    reasons = {item.metric: item.reason for item in usecase.recommend_metrics(profile)}
+    check("every recommendation carries a reason", all(reasons.values()))
+    check(
+        "field-driven reasons name the fields that drove them",
+        "Order number" in reasons["number_accuracy"],
+    )
+
+    # A prompt with no data collection should recommend baselines only.
+    bare = usecase.UseCaseProfile(use_case="Chit-chat", summary="Small talk.", fields=[])
+    check(
+        "a prompt collecting nothing recommends only baselines",
+        {item.metric for item in usecase.recommend_metrics(bare)} == set(usecase.BASELINE_METRICS),
+    )
+
+    per_field = {
+        "Order number": {"preserved": True, "type": "identifier"},
+        "Quantity": {"preserved": True, "type": "number"},
+        "Delivery date": {"preserved": False, "type": "date"},
+        "Location": {"preserved": True, "type": "location"},
+    }
+    categories = usecase_metrics.category_scores(per_field)
+    check("number accuracy rolls up both numeric fields", categories["number_accuracy"] == 1.0)
+    check("date accuracy reflects the lost date", categories["date_accuracy"] == 0.0)
+    check("location accuracy computed", categories["location_accuracy"] == 1.0)
+    check("absent categories are omitted", "name_accuracy" not in categories)
+
+    combined = usecase.score({"critical_fields": 0.75, "semantic_match": 1.0, "wer": 0.10})
+    expected = 0.75 * 0.60 + 1.0 * 0.25 + 0.90 * 0.15
+    check("use-case score is the stated weighting", abs(combined.score - expected) < 1e-9)
+    check("score exposes its parts", set(combined.parts) == {"critical_fields", "semantic_match", "wer"})
+    partial = usecase.score({"critical_fields": 1.0, "semantic_match": None, "wer": None})
+    check("weights renormalise over what ran", abs(partial.score - 1.0) < 1e-9)
+    check("missing metrics are named", partial.missing == ["semantic_match", "wer"])
+
     print("csv parsing")
     mapping, errors = parse_ground_truth_csv(
         b"id,text\nclip1,hello world\nclip2,\n", "ground_truth.csv"

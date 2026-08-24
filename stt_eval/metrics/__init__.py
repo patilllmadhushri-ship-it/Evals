@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 from typing import Callable, Literal
 
 from ..judge import Judge, JudgeError
-from . import llm_metrics
+from . import llm_metrics, usecase_metrics
 from .base import MetricValue
 from .wer import DeterministicScores, score_deterministic
 
@@ -108,6 +108,20 @@ METRIC_SPECS: list[MetricSpec] = [
         has_reasoning=True,
     ),
     MetricSpec(
+        key="critical_fields",
+        label="Critical field accuracy",
+        kind="llm",
+        question=(
+            "Did the transcript preserve the specific values this voice agent's "
+            "system prompt says it must collect — the order number, the date, "
+            "the address — checked one field at a time?"
+        ),
+        default_on=False,  # needs a use-case profile, so the prompt page enables it
+        aggregation="pooled",
+        lower_is_better=False,
+        has_reasoning=True,
+    ),
+    MetricSpec(
         key="semantic_match",
         label="Semantic match (LLM judge)",
         kind="llm",
@@ -145,7 +159,11 @@ _LLM_RUNNERS: dict[str, Callable[..., MetricValue]] = {
     "llm_wer": llm_metrics.llm_wer_cer,
     "semantic_wer": llm_metrics.semantic_wer,
     "semantic_match": llm_metrics.semantic_match,
+    "critical_fields": usecase_metrics.critical_fields,
 }
+
+#: Metrics that need to be told what to look for, beyond the transcript pair.
+_CONTEXT_AWARE = {"critical_fields"}
 
 
 def evaluate_pair(
@@ -157,6 +175,7 @@ def evaluate_pair(
     enabled_metrics: list[str],
     judge: Judge | None,
     language: str,
+    context: dict | None = None,
 ) -> PairEvaluation:
     """Score one (ground truth, prediction) pair across the enabled metrics."""
     evaluation = PairEvaluation(
@@ -191,14 +210,19 @@ def evaluate_pair(
     to_run = [key for key in requested_llm if key != "llm_cer"]
     for key in to_run:
         runner = _LLM_RUNNERS[key]
+        arguments = {
+            "judge": judge,
+            "ground_truth": ground_truth,
+            "prediction": prediction,
+            "language": language,
+            "deterministic": deterministic,
+        }
+        # Only context-aware metrics receive it, so existing metric signatures
+        # stay as they were.
+        if key in _CONTEXT_AWARE:
+            arguments["context"] = context
         try:
-            result = runner(
-                judge=judge,
-                ground_truth=ground_truth,
-                prediction=prediction,
-                language=language,
-                deterministic=deterministic,
-            )
+            result = runner(**arguments)
         except JudgeError as exc:
             failure = MetricValue(key=key, error=str(exc))
             evaluation.metrics[key] = failure

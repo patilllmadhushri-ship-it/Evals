@@ -49,6 +49,9 @@ class RunConfig:
     #: Fraction of pairs that receive the LLM metrics, stratified by
     #: deterministic error rate. 1.0 judges everything.
     llm_sample_rate: float = 1.0
+    #: Extra information context-aware metrics need — the critical fields a
+    #: system prompt requires, for instance. Ignored by every other metric.
+    metric_context: dict | None = None
     max_retries: int = 2
     retry_backoff_seconds: float = 1.5
 
@@ -387,6 +390,7 @@ class Runner:
                 prediction=result.prediction,
                 enabled_metrics=self.config.llm_metrics,
                 judge=self.judge,
+                context=self.config.metric_context,
                 # The judge is told the clip's own language, so it applies the
                 # right transliteration and code-switching rules.
                 language=clip.language_for(self.config.language),
@@ -410,6 +414,7 @@ def _metrics_payload(metrics: dict) -> dict:
             "error": metric.error,
             "errors": metric.errors,
             "length": metric.length,
+            "extra": metric.extra,
         }
         for key, metric in metrics.items()
     }

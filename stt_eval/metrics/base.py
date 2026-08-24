@@ -4,6 +4,7 @@ it without a circular dependency on the registry in ``metrics/__init__``."""
 from __future__ import annotations
 
 from dataclasses import dataclass
+from dataclasses import field as dataclasses_field
 
 
 @dataclass
@@ -18,6 +19,9 @@ class MetricValue:
     #: a pooled rate rather than an average of per-clip rates.
     errors: float | None = None
     length: float | None = None
+    #: Structured detail a metric wants to keep beside its score — the
+    #: per-field verdicts behind a critical-field result, for instance.
+    extra: dict = dataclasses_field(default_factory=dict)
 
     @property
     def ok(self) -> bool:
