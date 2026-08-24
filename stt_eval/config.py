@@ -41,9 +41,15 @@ JUDGE_BACKENDS = {
 # Reasoning-capable models worth judging with. The list is a starting point,
 # not a restriction — the UI lets you type any OpenRouter model slug, since
 # the catalogue changes faster than this file does.
-DEFAULT_OPENROUTER_MODEL = "deepseek/deepseek-r1"
+DEFAULT_OPENROUTER_MODEL = "nvidia/nemotron-3-ultra-550b-a55b:free"
 OPENROUTER_MODELS = [
+    # Free tier, strongest first. Note the daily free-model quota is
+    # account-wide on OpenRouter, so switching between these does not dodge a
+    # `free-models-per-day` 429 — only credits or a paid model does.
     "nvidia/nemotron-3-ultra-550b-a55b:free",
+    "nvidia/nemotron-3.5-lightning:free",
+    "google/gemma-4-26b-a4b-it:free",
+    # Paid, for runs that have to finish.
     "deepseek/deepseek-r1",
     "openai/o3-mini",
     "openai/gpt-5",
@@ -51,6 +57,14 @@ OPENROUTER_MODELS = [
     "google/gemini-2.5-pro",
     "qwen/qwq-32b",
     "x-ai/grok-4",
+]
+
+#: Tried in order when the chosen model is overloaded (502/503). Overload is
+#: per-model, so a sibling usually answers — unlike a daily quota, which is not.
+OPENROUTER_FALLBACKS = [
+    "nvidia/nemotron-3.5-lightning:free",
+    "google/gemma-4-26b-a4b-it:free",
+    "nvidia/nemotron-3-ultra-550b-a55b:free",
 ]
 
 #: Slugs ending in `:free` are served on OpenRouter's free tier, which is rate

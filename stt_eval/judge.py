@@ -22,6 +22,7 @@ from .config import (
     DEFAULT_JUDGE_MODEL,
     DEFAULT_OPENROUTER_MODEL,
     JUDGE_PRICING,
+    OPENROUTER_FALLBACKS,
     OPENROUTER_REFERER,
     OPENROUTER_TITLE,
 )
@@ -230,6 +231,20 @@ class OpenRouterJudge(Judge):
     timeout: float = 240.0
     #: Set once a model has rejected response_format, so we stop retrying it.
     _schema_unsupported: bool = field(default=False, repr=False)
+    #: Models to try when the chosen one is overloaded, and which one we
+    #: started from if a substitution happened — the UI should say so rather
+    #: than report a verdict from a model the user did not pick.
+    fallback_models: list[str] = field(default_factory=list)
+    substituted_from: str = ""
+    _tried: set[str] = field(default_factory=set, repr=False)
+
+    def _next_fallback(self) -> str:
+        """The next untried fallback, or empty when they are exhausted."""
+        self._tried.add(self.model)
+        for candidate in self.fallback_models:
+            if candidate not in self._tried:
+                return candidate
+        return ""
 
     def _headers(self) -> dict[str, str]:
         return {
@@ -271,12 +286,19 @@ class OpenRouterJudge(Judge):
         import requests
 
         system_prompt = system or self.system_prompt
+        original_model = self.model
+
+        # Two independent retries are in play: dropping the JSON schema for a
+        # model that rejects it, and switching model when this one is
+        # overloaded. Rebuilding the attempt list per model keeps them from
+        # consuming each other's budget.
         attempts = [not self._schema_unsupported]
         if attempts[0]:
             attempts.append(False)  # retry without response_format on rejection
 
         last_error: str = ""
-        for with_schema in attempts:
+        while attempts:
+            with_schema = attempts.pop(0)
             body = self._body(
                 system=system_prompt, prompt=prompt, schema=schema, with_schema=with_schema
             )
@@ -308,10 +330,20 @@ class OpenRouterJudge(Judge):
                         "for the daily quota to reset."
                     )
                 if response.status_code in (502, 503):
+                    # Overload is per-model, so a sibling usually answers. Try
+                    # one, once, and say which model actually produced the
+                    # verdict rather than silently substituting it.
+                    substitute = self._next_fallback()
+                    if substitute:
+                        self.model = substitute
+                        self.substituted_from = self.substituted_from or original_model
+                        self._schema_unsupported = False
+                        attempts = [True, False]  # fresh budget for the new model
+                        continue
                     raise JudgeError(
                         f"{self.model} is temporarily overloaded upstream — common on "
-                        "`:free` endpoints. Retry, or pick a paid model for a run "
-                        "that has to finish."
+                        "`:free` endpoints — and its fallbacks were too. Retry, or "
+                        "pick a paid model for a run that has to finish."
                     )
                 raise JudgeError(f"OpenRouter returned HTTP {response.status_code}: {detail}")
 
@@ -353,5 +385,17 @@ def create_judge(
     if backend == ANTHROPIC_BACKEND:
         return AnthropicJudge(api_key=api_key, model=model, effort=effort, max_tokens=max_tokens)
     if backend == OPENROUTER_BACKEND:
-        return OpenRouterJudge(api_key=api_key, model=model, effort=effort, max_tokens=max_tokens)
+        return OpenRouterJudge(
+            api_key=api_key,
+            model=model,
+            effort=effort,
+            max_tokens=max_tokens,
+            # Only free models fall back automatically: substituting a paid
+            # model would spend money the user did not choose to spend.
+            fallback_models=(
+                [item for item in OPENROUTER_FALLBACKS if item != model]
+                if model.endswith(":free")
+                else []
+            ),
+        )
     raise JudgeError(f"Unknown judge backend: {backend}")

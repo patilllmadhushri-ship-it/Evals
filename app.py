@@ -285,6 +285,11 @@ def prompt_page() -> None:
         )
         return
     st.caption(f"Judge: `{judge.model}` via {judge.backend}")
+    if getattr(judge, "substituted_from", ""):
+        st.info(
+            f"`{judge.substituted_from}` was overloaded, so `{judge.model}` "
+            "answered instead. Verdicts come from the model named above."
+        )
 
     # -- 1. system prompt ---------------------------------------------------
     st.subheader("1 · System prompt")

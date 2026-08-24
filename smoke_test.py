@@ -171,6 +171,25 @@ def main() -> int:
     check("schema requested when supported", "response_format" in body)
     fallback = judge._body(system="s", prompt="p", schema={"type": "object"}, with_schema=False)
     check("schema inlined in prompt on fallback", "response_format" not in fallback)
+
+    free_judge = create_judge(
+        backend="openrouter", api_key="k", model="nvidia/nemotron-3-ultra-550b-a55b:free"
+    )
+    check("free models get overload fallbacks", bool(free_judge.fallback_models))
+    check(
+        "a model never falls back to itself",
+        free_judge.model not in free_judge.fallback_models,
+    )
+    paid_judge = create_judge(backend="openrouter", api_key="k", model="openai/gpt-5")
+    check(
+        "paid models do not silently switch",
+        paid_judge.fallback_models == [],  # substituting would spend unasked-for money
+    )
+    free_judge._tried.add(free_judge.model)
+    first = free_judge._next_fallback()
+    check("fallback picks an untried model", first and first != free_judge.model)
+    free_judge._tried.update(free_judge.fallback_models)
+    check("fallbacks run out rather than looping", free_judge._next_fallback() == "")
     check("fallback prompt carries the schema", "type" in fallback["messages"][1]["content"])
 
     check(
