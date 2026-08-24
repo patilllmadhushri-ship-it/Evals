@@ -33,6 +33,11 @@ JUDGE_ENV_VARS = {
 
 JUDGE_ENV_VAR = JUDGE_ENV_VARS["anthropic"]  # back-compat alias
 
+#: Optional gate for a shared deployment. Unset means no gate, which is right
+#: for a local run and wrong for anything with a public URL — the app spends
+#: real API credits, so an open instance spends them for whoever finds it.
+PASSCODE_ENV_VAR = "APP_PASSCODE"
+
 
 def parse(text: str) -> dict[str, str]:
     """Parse `KEY=value` lines, ignoring blanks, comments and `export` prefixes."""
@@ -66,7 +71,11 @@ def _from_streamlit_secrets() -> dict[str, str]:
     except Exception:  # noqa: BLE001 - not running under Streamlit, or no secrets file
         return {}
 
-    wanted = list(PROVIDER_ENV_VARS.values()) + list(JUDGE_ENV_VARS.values())
+    wanted = (
+        list(PROVIDER_ENV_VARS.values())
+        + list(JUDGE_ENV_VARS.values())
+        + [PASSCODE_ENV_VAR]
+    )
     found: dict[str, str] = {}
     for name in wanted:
         try:
@@ -110,6 +119,11 @@ def judge_key(backend: str = "anthropic") -> str:
 
 def configured_judge_backends() -> list[str]:
     return [backend for backend in JUDGE_ENV_VARS if judge_key(backend)]
+
+
+def passcode() -> str:
+    """The shared passcode, or empty when the app is meant to be open."""
+    return os.environ.get(PASSCODE_ENV_VAR, "").strip()
 
 
 def configured_providers() -> list[str]:

@@ -52,6 +52,9 @@ def main() -> int:
         ["upload", "configure", "credentials", "run", "review", "export"]
     ):
         app = AppTest.from_file("app.py", default_timeout=60)
+        # A configured APP_PASSCODE gates every page. Simulate an unlocked
+        # session so these checks exercise the pages rather than the gate.
+        app.session_state["unlocked"] = True
         app.session_state["step"] = step
         app.session_state["run_id"] = RUN_ID
         app.session_state["dataset"] = dataset
@@ -61,11 +64,16 @@ def main() -> int:
         app.session_state["api_keys"] = {"mock": ""}
         app.run()
 
+        headers = [item.value for item in app.header]
         if app.exception:
             failures += 1
             print(f"  FAIL  step {step} ({name}): {app.exception[0].value}")
+        elif not headers:
+            # An empty page raises no exception, so without this a gated or
+            # silently-blank page passes. It did exactly that once.
+            failures += 1
+            print(f"  FAIL  step {step} ({name}): rendered no content")
         else:
-            headers = [item.value for item in app.header] or ["(no header)"]
             print(f"  PASS  step {step} ({name}) — {headers[0]}")
 
     # The prompt-based page is a separate mode, so it needs its own render check.
@@ -102,6 +110,7 @@ def main() -> int:
         ),
     ):
         app = AppTest.from_file("app.py", default_timeout=60)
+        app.session_state["unlocked"] = True
         app.session_state["mode"] = "Prompt-Based Evaluation"
         app.session_state["agent_prompt"] = "You are a logistics assistant."
         for key, value in state.items():
@@ -113,8 +122,36 @@ def main() -> int:
         else:
             print(f"  PASS  {label}")
 
+    # The passcode gate itself: with one configured, a fresh visitor must be
+    # stopped, and the right code must let them through.
+    from stt_eval import env
+
+    env.load()
+    if env.passcode():
+        locked = AppTest.from_file("app.py", default_timeout=60)
+        locked.run()
+        gated = not locked.header and any(
+            "passcode" in str(item.value).lower() for item in locked.caption
+        )
+        if gated:
+            print("  PASS  passcode gate blocks a fresh visitor")
+        else:
+            failures += 1
+            print("  FAIL  passcode gate did not block a fresh visitor")
+
+        unlocked = AppTest.from_file("app.py", default_timeout=60)
+        unlocked.session_state["unlocked"] = True
+        unlocked.run()
+        if unlocked.header:
+            print("  PASS  an unlocked session reaches the app")
+        else:
+            failures += 1
+            print("  FAIL  an unlocked session was still blocked")
+    else:
+        print("  SKIP  passcode gate — APP_PASSCODE not set")
+
     ResultStore().delete_run(RUN_ID)
-    print("\nAll steps rendered." if not failures else f"\n{failures} step(s) failed.")
+    print("\nAll steps rendered." if not failures else f"\n{failures} check(s) failed.")
     return 1 if failures else 0
 
 

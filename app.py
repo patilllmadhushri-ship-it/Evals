@@ -9,6 +9,7 @@ partial results stream in as each clip completes.
 from __future__ import annotations
 
 import hashlib
+import hmac
 import importlib
 import os
 import sys
@@ -154,6 +155,38 @@ def init_state() -> None:
 
 
 init_state()
+
+
+def require_passcode() -> None:
+    """Gate the app when `APP_PASSCODE` is set.
+
+    Unset — the local default — this does nothing. Set, every visitor must
+    enter it before reaching a page. This exists because the app spends real
+    provider and judge credits: an instance on a public URL with no gate spends
+    them for whoever finds the link, and links get forwarded.
+
+    A shared passcode is not authentication. It keeps a demo link from being
+    walked into; it is not a substitute for Cloudflare Access or equivalent on
+    anything long-lived.
+    """
+    expected = env.passcode()
+    if not expected or st.session_state.get("unlocked"):
+        return
+
+    st.title("🎙️ STT Evaluation Studio")
+    st.caption("This instance is shared. Enter the passcode you were given.")
+    entered = st.text_input("Passcode", type="password")
+    if entered:
+        # compare_digest avoids leaking the answer through response timing.
+        if hmac.compare_digest(entered, expected):
+            st.session_state.unlocked = True
+            st.rerun()
+        else:
+            st.error("That passcode is not correct.")
+    st.stop()
+
+
+require_passcode()
 
 
 @st.cache_resource
