@@ -349,7 +349,41 @@ class OpenRouterJudge(Judge):
 
             payload = response.json()
             if "error" in payload and payload["error"]:
-                raise JudgeError(f"OpenRouter error: {str(payload['error'])[:300]}")
+                # OpenRouter reports an upstream failure as HTTP 200 with the
+                # real status inside the body, so the same conditions have to
+                # be recognised here as well as on the response code.
+                inner = payload["error"] if isinstance(payload["error"], dict) else {}
+                inner_code = inner.get("code")
+                inner_detail = str(payload["error"])[:300]
+
+                if inner_code == 429 or "rate limit" in inner_detail.lower():
+                    limit = (
+                        "daily free-tier"
+                        if "free-models-per-day" in inner_detail
+                        else "rate"
+                    )
+                    raise JudgeError(
+                        f"{self.model} hit its {limit} limit on OpenRouter. Either add "
+                        "credits at openrouter.ai/credits, switch to a paid model in "
+                        "the judge settings, use an Anthropic key instead, or wait "
+                        "for the daily quota to reset."
+                    )
+
+                if inner_code in (500, 502, 503) or "overloaded" in inner_detail.lower():
+                    substitute = self._next_fallback()
+                    if substitute:
+                        self.model = substitute
+                        self.substituted_from = self.substituted_from or original_model
+                        self._schema_unsupported = False
+                        attempts = [True, False]
+                        continue
+                    raise JudgeError(
+                        f"{self.model} is temporarily overloaded upstream — common on "
+                        "`:free` endpoints — and its fallbacks were too. Retry, or "
+                        "pick a paid model for a run that has to finish."
+                    )
+
+                raise JudgeError(f"OpenRouter error: {inner_detail}")
 
             usage = payload.get("usage") or {}
             details = usage.get("completion_tokens_details") or {}
