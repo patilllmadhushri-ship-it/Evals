@@ -284,7 +284,42 @@ def prompt_page() -> None:
             "Evaluation → step 3."
         )
         return
-    st.caption(f"Judge: `{judge.model}` via {judge.backend}")
+    # The judge is chosen here rather than only in the dataset flow's step 3:
+    # this mode cannot do anything without one, and the model choice is a
+    # speed/quality trade-off worth making in front of the user.
+    judge_columns = st.columns([3, 1])
+    with judge_columns[0]:
+        if judge.backend == "openrouter":
+            models = OPENROUTER_MODELS
+            chosen_model = st.selectbox(
+                "Judge model",
+                models,
+                index=models.index(judge.model) if judge.model in models else 0,
+                accept_new_options=True,
+                help="On free endpoints the wait is mostly queueing, not model "
+                "speed — a 'fast' model can be slower than a bigger one, and "
+                "measured here it was. Only a paid model is reliably quick.",
+            )
+            if chosen_model != st.session_state.judge_model:
+                st.session_state.judge_model = chosen_model
+                st.rerun()
+        else:
+            st.caption(f"Judge: `{judge.model}` via {judge.backend}")
+    with judge_columns[1]:
+        efforts = ["low", "medium", "high"]
+        effort = st.selectbox(
+            "Effort", efforts, index=efforts.index(st.session_state.judge_effort)
+        )
+        if effort != st.session_state.judge_effort:
+            st.session_state.judge_effort = effort
+            st.rerun()
+
+    if judge.model.endswith(":free"):
+        st.caption(
+            "⏳ **Each step below takes 30–90 seconds on a free endpoint** — the "
+            "page sits still while it waits, and that is queueing, not a failure. "
+            "A paid model is the only reliable way to make this quick."
+        )
     if getattr(judge, "substituted_from", ""):
         st.info(
             f"`{judge.substituted_from}` was overloaded, so `{judge.model}` "
@@ -306,7 +341,10 @@ def prompt_page() -> None:
 
     if st.button("Analyse prompt", type="primary", disabled=not st.session_state.agent_prompt.strip()):
         try:
-            with st.spinner("Reading the prompt…"):
+            with st.spinner(
+                f"Reading the prompt with {judge.model} — this takes 20–40s on a "
+                "free reasoning model. Leave the page open."
+            ):
                 profile = usecase.analyze(judge, st.session_state.agent_prompt)
             st.session_state.usecase_profile = profile
             st.session_state.metric_plan = usecase.select(profile)
@@ -472,7 +510,10 @@ def prompt_page() -> None:
     with scenario_columns[1]:
         if st.button("Generate sentence", width="stretch"):
             try:
-                with st.spinner("Writing a test sentence…"):
+                with st.spinner(
+                    f"Writing a test sentence with {judge.model} — 20–40s on a free "
+                    "reasoning model."
+                ):
                     st.session_state.usecase_scenario = usecase.generate(
                         judge,
                         profile,
