@@ -13,6 +13,7 @@ import hmac
 import importlib
 import os
 import sys
+import threading
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
@@ -217,6 +218,49 @@ def uses_judge() -> bool:
     return any(key in LLM_KEYS for key in enabled_metrics())
 
 
+def with_progress(label: str, work, *, expect_seconds: float = 40.0):
+    """Run `work` off the main thread and show a ticking progress panel.
+
+    A judge call takes 30-90 seconds on a free endpoint. Streamlit's spinner is
+    a small animation with no elapsed time, so a page mid-call is hard to tell
+    from a page that has done nothing — which is exactly how it was read.
+
+    `work` runs in a worker thread, so it must not touch `st.session_state`:
+    that is bound to the script-run thread. Pass what it needs as arguments.
+    """
+    outcome: dict = {}
+
+    def _worker() -> None:
+        try:
+            outcome["value"] = work()
+        except BaseException as exc:  # noqa: BLE001 - re-raised on the main thread
+            outcome["error"] = exc
+
+    thread = threading.Thread(target=_worker, daemon=True)
+    thread.start()
+
+    panel = st.empty()
+    started = time.time()
+    while thread.is_alive():
+        elapsed = time.time() - started
+        with panel.container():
+            st.info(f"⏳ **{label}** — running, {elapsed:.0f}s elapsed")
+            # Creeps toward but never reaches the end: the estimate is a guess,
+            # and a bar sitting full while the work continues is a lie.
+            st.progress(min(0.95, elapsed / expect_seconds))
+            st.caption(
+                f"Typically {expect_seconds:.0f}s on a free endpoint. Leave the "
+                "page open — clicking again starts over."
+            )
+        time.sleep(0.4)
+    thread.join()
+    panel.empty()
+
+    if "error" in outcome:
+        raise outcome["error"]
+    return outcome.get("value")
+
+
 def build_configured_judge():
     """The judge to use, or None when no backend has a key anywhere.
 
@@ -341,11 +385,11 @@ def prompt_page() -> None:
 
     if st.button("Analyse prompt", type="primary", disabled=not st.session_state.agent_prompt.strip()):
         try:
-            with st.spinner(
-                f"Reading the prompt with {judge.model} — this takes 20–40s on a "
-                "free reasoning model. Leave the page open."
-            ):
-                profile = usecase.analyze(judge, st.session_state.agent_prompt)
+            prompt_text = st.session_state.agent_prompt  # read on the main thread
+            profile = with_progress(
+                f"Reading your system prompt with {judge.model}",
+                lambda: usecase.analyze(judge, prompt_text),
+            )
             st.session_state.usecase_profile = profile
             st.session_state.metric_plan = usecase.select(profile)
             st.session_state.usecase_scenario = None
@@ -384,10 +428,11 @@ def prompt_page() -> None:
             width="stretch",
         ):
             try:
-                with st.spinner(f"Re-reading the prompt as {picked}…"):
-                    profile = usecase.analyze(
-                        judge, st.session_state.agent_prompt, use_case_hint=picked
-                    )
+                prompt_text = st.session_state.agent_prompt
+                profile = with_progress(
+                    f"Re-reading your prompt as {picked}",
+                    lambda: usecase.analyze(judge, prompt_text, use_case_hint=picked),
+                )
                 st.session_state.usecase_profile = profile
                 st.session_state.metric_plan = usecase.select(profile)
                 st.session_state.usecase_scenario = None
@@ -510,16 +555,17 @@ def prompt_page() -> None:
     with scenario_columns[1]:
         if st.button("Generate sentence", width="stretch"):
             try:
-                with st.spinner(
-                    f"Writing a test sentence with {judge.model} — 20–40s on a free "
-                    "reasoning model."
-                ):
-                    st.session_state.usecase_scenario = usecase.generate(
+                language = st.session_state.language
+                st.session_state.usecase_scenario = with_progress(
+                    f"Writing a {usecase.SCENARIO_TYPES[scenario_type][0].lower()} "
+                    "sentence that tests your fields",
+                    lambda: usecase.generate(
                         judge,
                         profile,
                         scenario_type=scenario_type,
-                        language=st.session_state.language,
-                    )
+                        language=language,
+                    ),
+                )
             except JudgeError as exc:
                 st.error(str(exc))
             st.rerun()
@@ -592,34 +638,56 @@ def prompt_page() -> None:
         metrics = plan.runnable_metrics
         run_id = f"prompt-{uuid.uuid4().hex[:8]}"
         try:
-            with st.spinner("Transcribing and scoring…"):
-                dataset = build_dataset(
-                    [("utterance.wav", recording.getvalue())],
-                    {"utterance": edited.strip()},
-                    ground_truth_source="the generated test sentence",
-                    sample_rate=st.session_state.sample_rate,
-                )
-                if not dataset.is_runnable:
-                    for message in dataset.errors:
-                        st.error(message)
-                    return
-                runner = Runner(
-                    config=RunConfig(
-                        run_id=run_id,
-                        language=language,
-                        provider_keys=chosen,
-                        api_keys={key: env.provider_key(key) for key in chosen},
-                        enabled_metrics=metrics,
-                        per_provider_concurrency=len(chosen),
-                        judge_concurrency=st.session_state.judge_concurrency,
-                        metric_context=profile.as_context(scenario.expected),
-                    ),
-                    dataset=dataset,
-                    store=store,
-                    judge=judge,
-                )
-                runner.start()
-                runner._thread.join(timeout=600)  # noqa: SLF001 - page waits on its own run
+            dataset = build_dataset(
+                [("utterance.wav", recording.getvalue())],
+                {"utterance": edited.strip()},
+                ground_truth_source="the generated test sentence",
+                sample_rate=st.session_state.sample_rate,
+            )
+            if not dataset.is_runnable:
+                for message in dataset.errors:
+                    st.error(message)
+                return
+
+            runner = Runner(
+                config=RunConfig(
+                    run_id=run_id,
+                    language=language,
+                    provider_keys=chosen,
+                    api_keys={key: env.provider_key(key) for key in chosen},
+                    enabled_metrics=metrics,
+                    per_provider_concurrency=len(chosen),
+                    judge_concurrency=st.session_state.judge_concurrency,
+                    metric_context=profile.as_context(scenario.expected),
+                ),
+                dataset=dataset,
+                store=store,
+                judge=judge,
+            )
+            runner.start()
+
+            # The runner already reports its own stage and counts, so show
+            # those rather than a generic timer: transcription finishes in
+            # seconds while judging is what the wait is actually spent on.
+            panel = st.empty()
+            started = time.time()
+            while runner.is_running:
+                snapshot, _ = runner.snapshot()
+                with panel.container():
+                    stage = {
+                        "transcribing": "Sending your audio to the providers",
+                        "scoring": "Judging the transcripts against your critical fields",
+                    }.get(snapshot.stage, snapshot.stage)
+                    st.info(f"⏳ **{stage}** — {time.time() - started:.0f}s elapsed")
+                    st.progress(snapshot.fraction)
+                    st.caption(
+                        f"{snapshot.transcribed}/{snapshot.total} transcribed"
+                        + (f" · {snapshot.scored}/{snapshot.to_score} judged" if snapshot.to_score else "")
+                        + ". Judging is the slow part on a free endpoint."
+                    )
+                time.sleep(0.5)
+            panel.empty()
+
             st.session_state.prompt_run_id = run_id
             st.session_state.prompt_results = store.load(run_id)
             st.session_state.prompt_metrics = metrics
