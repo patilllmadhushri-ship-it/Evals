@@ -140,26 +140,44 @@ class Judge:
     def check(self) -> None:
         """Cheap round-trip so a bad key or model fails at setup, not mid-run.
 
-        The prompt deliberately contains no literal JSON example. Showing one
-        alongside a schema makes some models nest the example inside the
-        schema's own field — `{"ok": {"ok": true}}` — which is a failure of the
-        prompt, not of the model or the key.
+        This is a real judgement rather than a toy `{"ok": true}` probe. A
+        trivial schema with no substance to reason about invites some models to
+        echo the schema back nested inside itself, which fails the check while
+        every actual metric call on the same model succeeds — a probe that
+        reports a working judge as broken is worse than none.
         """
         payload = self.ask_json(
-            system=(
-                "You are validating that structured output works. Set the field "
-                "to true. Return only the object described by the schema."
+            system=self.system_prompt,
+            prompt=(
+                "Language: en\n\n"
+                "REFERENCE (what was actually said):\n"
+                "The invoice is for five hundred rupees\n\n"
+                "PREDICTION (speech-to-text output):\n"
+                "The invoice is for 500 rupees\n\n"
+                "Does the prediction mean the same thing as the reference? Give "
+                "the deciding reason in `reasoning`."
             ),
-            prompt="Confirm you can respond in the required format by setting ok to true.",
             schema={
                 "type": "object",
-                "properties": {"ok": {"type": "boolean"}},
-                "required": ["ok"],
+                "properties": {
+                    "match": {"type": "boolean"},
+                    "reasoning": {"type": "string"},
+                },
+                "required": ["match", "reasoning"],
                 "additionalProperties": False,
             },
         )
-        if not payload.get("ok"):
+        if "match" not in payload:
             raise JudgeError(f"Unexpected validation response: {payload}")
+        if not payload.get("match"):
+            # Numerals versus number words are equivalent under the shared
+            # prompt, so a judge saying otherwise is misreading its rules.
+            raise JudgeError(
+                "This model reached the API but judged '500' and 'five hundred' "
+                "as different meanings, which the judging rules explicitly treat "
+                "as equivalent. Its verdicts would not be trustworthy — pick a "
+                "different model."
+            )
 
 
 @dataclass
