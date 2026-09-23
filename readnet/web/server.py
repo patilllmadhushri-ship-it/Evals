@@ -431,7 +431,7 @@ def api_score(body: dict) -> dict:
         "mistake_profile": dict(item.result.mistake_profile),
         "ops": ops,
     }
-    threshold = float(gop_threshold) if gop_threshold is not None else -1.0
+    threshold = float(gop_threshold) if gop_threshold is not None else 0.0
     response["wrong_letters"] = wrong_letters(response, language, threshold)
     return response
 
