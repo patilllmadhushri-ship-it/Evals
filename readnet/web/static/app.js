@@ -168,6 +168,7 @@ function currentEngine() { return $("engine").value; }
 
 async function loadConfig(language) {
   state.config = await api(`/api/config?language=${language}`);
+  $("demo-banner").hidden = !state.config.public;
   state.language = language;
   $("language-switch").innerHTML = state.config.languages
     .map((l) => `<button type="button" data-lang="${l.code}" class="${l.code === language ? "active" : ""}" role="radio" aria-checked="${l.code === language}">${esc(l.name)}</button>`)
@@ -661,9 +662,31 @@ $("edit-text").addEventListener("click", () => {
   $("task-text").hidden = editing;
 });
 
+function startupProblem(message) {
+  const box = document.createElement("div");
+  box.className = "error startup-error";
+  box.innerHTML = message;
+  document.querySelector(".main").prepend(box);
+}
+
+const RESTART = "Restart the server: in its PowerShell window press Ctrl+C, then run <b>py -m readnet.web</b> from the stt folder, and reload this page.";
+
 (async function init() {
-  await loadStudents();
-  await loadConfig("hi");
+  // The server reads these page files fresh on every request but loads its own
+  // code only at start, so a server started before an update serves the new page
+  // with an old API. Never let that leave a blank page.
+  try {
+    await loadConfig("hi");
+  } catch (err) {
+    startupProblem(`The page could not load its settings (${esc(err.message)}). ${RESTART}`);
+    return;
+  }
+  try {
+    await loadStudents();
+  } catch (err) {
+    $("student").innerHTML = `<option value="">Student records unavailable</option>`;
+    startupProblem(`Student records are unavailable (${esc(err.message)}): the server is probably older than this page. ${RESTART}`);
+  }
   setupQuick();
   showTask();
   onEngineChange();

@@ -238,3 +238,6 @@ td.big { font-size: 1.5rem; }
 .level-chart .axis { fill: var(--muted); font-size: 11px; font-family: "Inter", sans-serif; }
 .level-chart .line { fill: none; stroke: var(--accent); stroke-width: 2; }
 .level-chart .dot { fill: var(--accent); }
+
+.demo-banner { background: var(--accent-soft); color: #1d3f9e; border-bottom: 1px solid #cbd8ff; padding: .6rem 1.5rem; font-size: .88rem; }
+.startup-error { margin: 0 0 1rem; }
