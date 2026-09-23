@@ -11,7 +11,7 @@
     {
       "name": "readnet",
       "runtimeExecutable": "py",
-      "runtimeArgs": ["-m", "streamlit", "run", "readnet_app.py", "--server.port", "8502", "--server.headless", "true"],
+      "runtimeArgs": ["-m", "readnet.web", "--port", "8502"],
       "port": 8502,
       "autoPort": false
     }

@@ -1,0 +1,105 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ReadNet</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Noto+Sans+Devanagari:wght@400;500;600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="brand-name">ReadNet</span>
+      <span class="brand-sub">ASER reading assessment</span>
+    </div>
+    <div class="segmented" id="language-switch" role="radiogroup" aria-label="Language"></div>
+  </header>
+
+  <div class="layout">
+    <aside class="panel settings">
+      <h2 class="panel-title">Setup</h2>
+      <label class="field">
+        <span class="field-label">Speech engine</span>
+        <select id="engine"></select>
+        <span class="field-note" id="engine-note"></span>
+      </label>
+      <div id="local-fields" hidden>
+        <label class="field">
+          <span class="field-label">Hugging Face CTC model</span>
+          <input id="model-id" type="text" spellcheck="false">
+        </label>
+        <label class="field">
+          <span class="field-label">Flag words with GOP below <b id="gop-value">-3.0</b></span>
+          <input id="gop" type="range" min="-10" max="2" step="0.5" value="-3">
+          <span class="field-note">Uncalibrated. Flagged words are shown for review, never counted.</span>
+        </label>
+      </div>
+      <label class="field">
+        <span class="field-label">Child (optional, not saved)</span>
+        <input id="child" type="text" placeholder="Name or ID">
+      </label>
+      <button class="btn btn-secondary btn-block" id="new-child">New child</button>
+      <p class="fine-print">Audio is used once for scoring and never stored.</p>
+    </aside>
+
+    <main class="main">
+      <nav class="tabs" role="tablist">
+        <button class="tab active" data-tab="assessment" role="tab">Assessment</button>
+        <button class="tab" data-tab="quick" role="tab">Quick check</button>
+      </nav>
+
+      <section id="tab-assessment" class="tab-panel">
+        <ol class="stepper" id="stepper"></ol>
+
+        <div id="task-view">
+          <div class="card">
+            <div class="task-head">
+              <div>
+                <h1 class="task-title" id="task-title"></h1>
+                <p class="task-instruction" id="task-instruction"></p>
+              </div>
+              <button class="link-btn" id="edit-text">Change text</button>
+            </div>
+            <div class="reading-text" id="task-text"></div>
+            <textarea class="text-editor" id="task-text-editor" hidden></textarea>
+            <p class="task-rule" id="task-rule"></p>
+          </div>
+
+          <div class="card" id="task-input"></div>
+          <div id="task-result"></div>
+        </div>
+
+        <div id="final-view" hidden></div>
+      </section>
+
+      <section id="tab-quick" class="tab-panel" hidden>
+        <div class="card">
+          <p class="muted">Score one reading against any text, to try a rule or a tricky word.</p>
+          <div class="row">
+            <label class="field narrow">
+              <span class="field-label">Task type</span>
+              <select id="quick-level">
+                <option value="LETTER">Letters</option>
+                <option value="WORD">Words</option>
+                <option value="PARAGRAPH" selected>Paragraph</option>
+                <option value="STORY">Story</option>
+              </select>
+            </label>
+            <label class="field grow">
+              <span class="field-label">Text on the screen</span>
+              <input id="quick-text" type="text" class="deva">
+            </label>
+          </div>
+        </div>
+        <div class="card" id="quick-input"></div>
+        <div id="quick-result"></div>
+      </section>
+    </main>
+  </div>
+
+  <script src="/app.js"></script>
+</body>
+</html>

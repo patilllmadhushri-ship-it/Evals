@@ -1,0 +1,318 @@
+"""ReadNet test bench: a plain HTTP server and one page. No web framework.
+
+    py -m readnet.web                 # http://127.0.0.1:8600
+    py -m readnet.web --port 8502
+
+The page (static/) records the child in the browser as WAV and calls a small
+JSON API:
+
+    GET  /api/config?language=hi   engines, texts and task copy
+    POST /api/score                transcribe one reading and mark every word
+    POST /api/next                 the next ASER task, or the final placement
+    POST /api/dispute              save an assessor disagreement as a field case
+
+Audio is used for the one request and never written to disk. Disputes go to
+.stt_eval_runs/ (git-ignored) because they contain children's readings.
+"""
+
+from __future__ import annotations
+
+import argparse
+import base64
+import csv
+import importlib.util
+import json
+import mimetypes
+import time
+from datetime import datetime
+from functools import lru_cache
+from http import HTTPStatus
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+from urllib.parse import parse_qs, urlparse
+
+from stt_eval import audio as stt_audio
+from stt_eval import env, providers
+from stt_eval.providers import ProviderError
+
+from .. import languages
+from ..aser import Level, TaskOutcome, next_task, place
+from ..pipeline import assess_task
+from .content import CONTENT, NEXT_STEPS, TASKS
+
+STATIC = Path(__file__).with_name("static")
+DISPUTE_LOG = Path(".stt_eval_runs") / "readnet_disputes.csv"
+LOCALES = {"hi": "hi-IN", "mr": "mr-IN"}
+DEFAULT_LOCAL_MODEL = {"hi": "ai4bharat/indicwav2vec-hindi", "mr": ""}
+TYPED, LOCAL = "typed", "local"
+#: Indic-first engines first: Sarvam is built for Hindi and Marathi.
+PREFERRED = ["sarvam", "google", "deepgram", "elevenlabs", "openai", "mock"]
+
+
+class ApiError(Exception):
+    def __init__(self, message: str, status: HTTPStatus = HTTPStatus.BAD_REQUEST):
+        super().__init__(message)
+        self.status = status
+
+
+# -- engines ------------------------------------------------------------------------
+
+
+@lru_cache(maxsize=1)
+def local_model_problem() -> str:
+    """Why the local model cannot run here, or "" when it can.
+
+    Installed is not the same as loadable: on Windows, torch also needs the
+    Microsoft Visual C++ Redistributable, and fails at import without it.
+    """
+    missing = [m for m in ("torch", "transformers") if importlib.util.find_spec(m) is None]
+    if missing:
+        return f"Needs {' and '.join(missing)}: py -m pip install torch transformers, then restart."
+    try:
+        import torch  # noqa: F401
+    except OSError:
+        return ("torch is installed but cannot load: install the Microsoft Visual C++ Redistributable "
+                "(https://aka.ms/vs/17/release/vc_redist.x64.exe), then restart.")
+    except ImportError as error:
+        return f"torch cannot load: {error}"
+    return ""
+
+
+def local_model_available() -> bool:
+    return not local_model_problem()
+
+
+def engines(language: str) -> list[dict]:
+    available = providers.providers_for_language(LOCALES[language])
+    out: list[dict] = []
+    for key in sorted(available, key=lambda k: PREFERRED.index(k) if k in PREFERRED else len(PREFERRED)):
+        if key == "mock":
+            out.append({"key": key, "label": "Mock (simulated reading)",
+                        "note": "Drops words at random from the screen text. For trying the flow without a microphone."})
+        elif env.provider_key(key):
+            out.append({"key": key, "label": f"{providers.provider_label(key)} (cloud)", "note": ""})
+    out.append({"key": LOCAL, "label": "Local model (wav2vec2, with word timings and GOP)",
+                "note": local_model_problem()})
+    out.append({"key": TYPED, "label": "No speech engine: type what the child said", "note": ""})
+    return out
+
+
+@lru_cache(maxsize=2)
+def load_local_model(model_id: str):
+    from ..acoustic import Wav2Vec2Emissions
+
+    return Wav2Vec2Emissions(model_id)
+
+
+def transcribe(engine: str, audio: bytes | None, filename: str, canonical: str, language: str, model_id: str):
+    """Returns (transcript, seconds, acoustic evidence or None)."""
+    started = time.perf_counter()
+    if engine == "mock":
+        mock = providers.build("mock", "")
+        mock._ground_truth_hint = canonical
+        text = mock.transcribe(audio or canonical.encode("utf-8"), LOCALES[language]).text
+        return text, time.perf_counter() - started, None
+    if not audio:
+        raise ApiError("Record or upload the child's reading first.")
+
+    clip = stt_audio.normalize(audio, filename or "recording.wav", sample_rate=16000)
+    if engine == LOCAL:
+        if not local_model_available():
+            raise ApiError(local_model_problem())
+        if not model_id:
+            raise ApiError("Enter a Hugging Face CTC model id for this language.")
+        from ..acoustic import evidence_for_words, greedy_decode
+
+        em = load_local_model(model_id).emissions(clip.wav_bytes)
+        words = languages.get(language).normalize(canonical)[0].split()
+        evidence = evidence_for_words(em.log_probs, words, em.vocab, frame_seconds=em.frame_seconds,
+                                      blank=em.blank, word_delimiter=em.word_delimiter)
+        return greedy_decode(em), time.perf_counter() - started, evidence
+
+    if engine not in providers.PROVIDER_CLASSES or not env.provider_key(engine):
+        raise ApiError(f"No key configured for {engine}.")
+    provider = providers.build(engine, env.provider_key(engine))
+    return provider.transcribe(clip.wav_bytes, LOCALES[language]).text, time.perf_counter() - started, None
+
+
+# -- API handlers -----------------------------------------------------------------------
+
+
+def _language(value) -> str:
+    code = str(value or "hi")
+    if code not in LOCALES:
+        raise ApiError(f"Unsupported language: {code}")
+    return code
+
+
+def _outcome_dict(outcome: TaskOutcome) -> dict:
+    return {
+        "level": outcome.level.name, "passed": outcome.passed, "mistakes": outcome.mistakes,
+        "correct": outcome.correct, "total": outcome.total, "wpm": outcome.wpm,
+        "longest_pause": outcome.longest_pause, "reasons": outcome.reasons,
+    }
+
+
+def api_config(query: dict) -> dict:
+    language = _language(query.get("language", ["hi"])[0])
+    return {
+        "languages": [{"code": c, "name": languages.get(c).name} for c in LOCALES],
+        "language": language,
+        "engines": engines(language),
+        "default_local_model": DEFAULT_LOCAL_MODEL[language],
+        "content": {level.name: text for level, text in CONTENT[language].items()},
+        "tasks": {level.name: copy for level, copy in TASKS.items()},
+    }
+
+
+def api_score(body: dict) -> dict:
+    language = _language(body.get("language"))
+    try:
+        level = Level[str(body.get("level", "PARAGRAPH")).upper()]
+    except KeyError as error:
+        raise ApiError(f"Unknown level: {body.get('level')}") from error
+    text = str(body.get("text") or "").strip()
+    if not text:
+        raise ApiError("The text shown to the child is empty.")
+    engine = str(body.get("engine") or TYPED)
+    gop_threshold = body.get("gop_threshold")
+
+    if engine == TYPED:
+        transcript, seconds, evidence = str(body.get("typed") or ""), 0.0, None
+    else:
+        audio = base64.b64decode(body["audio_b64"]) if body.get("audio_b64") else None
+        try:
+            transcript, seconds, evidence = transcribe(
+                engine, audio, str(body.get("filename") or ""), text, language, str(body.get("model_id") or "")
+            )
+        except (ProviderError, stt_audio.AudioError, OSError, ImportError, ValueError) as error:
+            raise ApiError(f"Could not transcribe: {error}", HTTPStatus.BAD_GATEWAY) from error
+
+    outcome, items = assess_task(
+        level, [(text, transcript)], language=language, acoustic=[evidence] if evidence else None,
+        gop_threshold=float(gop_threshold) if evidence and gop_threshold is not None else None,
+    )
+    item = items[0]
+    ops = []
+    for op in item.result.ops:
+        entry = {k: v for k, v in op.__dict__.items()}
+        entry["subtypes"] = list(op.subtypes)
+        if evidence and op.ref_index is not None and op.ref_index < len(evidence.words):
+            w = evidence.words[op.ref_index]
+            entry.update(start_s=w.start_s, end_s=w.end_s, gop=w.llr)
+        ops.append(entry)
+    return {
+        "outcome": _outcome_dict(outcome),
+        "transcript": transcript,
+        "seconds": round(seconds, 2),
+        "canonical_normalized": item.canonical_normalized,
+        "transcript_normalized": item.transcript_normalized,
+        "changes": [{"rule": r, "before": b, "after": a} for r, b, a in item.transcript_trace.steps],
+        "acoustic_doubts": item.acoustic_doubts,
+        "mistake_profile": dict(item.result.mistake_profile),
+        "ops": ops,
+    }
+
+
+def api_next(body: dict) -> dict:
+    outcomes: dict[Level, TaskOutcome] = {}
+    for name, o in (body.get("outcomes") or {}).items():
+        level = Level[name]
+        outcomes[level] = TaskOutcome(level, bool(o["passed"]), int(o.get("mistakes", 0)),
+                                      int(o.get("correct", 0)), int(o.get("total", 0)),
+                                      reasons=list(o.get("reasons", [])))
+    upcoming = next_task(outcomes)
+    if upcoming is not None:
+        return {"next": upcoming.name, "placement": None}
+    placement = place(outcomes)
+    return {"next": None, "placement": {
+        "level": placement.level.name, "label": placement.level.label,
+        "path": placement.path, "next_step": NEXT_STEPS[placement.level],
+    }}
+
+
+def api_dispute(body: dict) -> dict:
+    DISPUTE_LOG.parent.mkdir(exist_ok=True)
+    new = not DISPUTE_LOG.exists()
+    with DISPUTE_LOG.open("a", encoding="utf-8", newline="") as handle:
+        writer = csv.writer(handle)
+        if new:
+            writer.writerow(["saved_at", "language", "level", "canonical", "transcript",
+                             "system_mistakes", "human_mistakes", "note"])
+        writer.writerow([datetime.now().isoformat(timespec="seconds"), _language(body.get("language")),
+                         str(body.get("level", "")).lower(), body.get("text", ""), body.get("transcript", ""),
+                         body.get("system_mistakes", ""), body.get("human_mistakes", ""), body.get("note", "")])
+    return {"saved": str(DISPUTE_LOG)}
+
+
+# -- HTTP -----------------------------------------------------------------------------
+
+
+class Handler(BaseHTTPRequestHandler):
+    server_version = "ReadNet"
+
+    def log_message(self, fmt, *args):  # quieter: method and path only
+        print(f"{self.command} {self.path.split('?')[0]} {args[1] if len(args) > 1 else ''}")
+
+    def _send(self, status: HTTPStatus, body: bytes, content_type: str) -> None:
+        self.send_response(status)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _json(self, status: HTTPStatus, payload: dict) -> None:
+        self._send(status, json.dumps(payload, ensure_ascii=False, default=str).encode("utf-8"),
+                   "application/json; charset=utf-8")
+
+    def do_GET(self):
+        url = urlparse(self.path)
+        if url.path == "/api/config":
+            return self._handle(lambda: api_config(parse_qs(url.query)))
+        name = "index.html" if url.path in ("/", "") else url.path.lstrip("/")
+        file = (STATIC / name).resolve()
+        if STATIC.resolve() not in file.parents or not file.is_file():
+            return self._send(HTTPStatus.NOT_FOUND, b"Not found", "text/plain")
+        kind = mimetypes.guess_type(file.name)[0] or "application/octet-stream"
+        if kind.startswith("text/") or kind.endswith("javascript"):
+            kind += "; charset=utf-8"
+        self._send(HTTPStatus.OK, file.read_bytes(), kind)
+
+    def do_POST(self):
+        routes = {"/api/score": api_score, "/api/next": api_next, "/api/dispute": api_dispute}
+        handler = routes.get(urlparse(self.path).path)
+        if handler is None:
+            return self._json(HTTPStatus.NOT_FOUND, {"error": "Unknown endpoint"})
+        length = int(self.headers.get("Content-Length") or 0)
+        try:
+            body = json.loads(self.rfile.read(length) or b"{}")
+        except json.JSONDecodeError:
+            return self._json(HTTPStatus.BAD_REQUEST, {"error": "Body must be JSON"})
+        self._handle(lambda: handler(body))
+
+    def _handle(self, fn) -> None:
+        try:
+            self._json(HTTPStatus.OK, fn())
+        except ApiError as error:
+            self._json(error.status, {"error": str(error)})
+        except Exception as error:  # noqa: BLE001 - report, don't drop the connection
+            self._json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": f"{type(error).__name__}: {error}"})
+
+
+def make_server(host: str = "127.0.0.1", port: int = 8600) -> ThreadingHTTPServer:
+    env.load()
+    return ThreadingHTTPServer((host, port), Handler)
+
+
+def main(argv: list[str] | None = None) -> None:
+    parser = argparse.ArgumentParser(prog="readnet.web")
+    parser.add_argument("--host", default="127.0.0.1")
+    parser.add_argument("--port", type=int, default=8600)
+    args = parser.parse_args(argv)
+    server = make_server(args.host, args.port)
+    print(f"ReadNet test bench on http://{args.host}:{args.port}")
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        pass

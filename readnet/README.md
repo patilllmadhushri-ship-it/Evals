@@ -6,20 +6,25 @@ also gives the child's mistake profile. It implements the ReadNet / PadhAI
 blueprint and the "Turning speech into a reading score" approach, for Hindi
 and Marathi, with a template for the next languages.
 
-## Try it: the test bench app
+## Try it: the test bench
 
 ```bash
-py -m streamlit run readnet_app.py
+py -m readnet.web
 ```
 
-Pick a language and a speech engine in the sidebar: Sarvam, Google, Deepgram
-or ElevenLabs (keys from `.env`), a local wav2vec2 model, Mock, or "type what
-the child said". The child then reads each task aloud. The app transcribes,
-colours every word (read right / forgiven, with the rule id / mistake / extra
-sound), and walks the ASER order to a level. Each task's verdict can be
-disputed; disputes go to `.stt_eval_runs/readnet_disputes.csv` as candidate
-field cases. Audio is never stored. `py readnet_ui_test.py` walks a full
-session headlessly.
+Then open http://127.0.0.1:8600. It is a plain page served by a small
+Python server (`readnet/web/`), with no web framework. Pick a language and a
+speech engine: Sarvam, Google, Deepgram or ElevenLabs (keys from `.env`), the
+local wav2vec2 model, Mock, or "type what the child said". The child reads
+each task aloud; the page records WAV in the browser. The app then
+transcribes, colours every word (read right / forgiven, with the rule id /
+mistake / extra sound), and walks the ASER order to a level.
+
+The local model is the one that adds word timings and GOP. It needs `torch` and
+`transformers`, and on Windows also the Microsoft Visual C++ Redistributable;
+the engine list says which is missing. Each verdict can be disputed; disputes
+go to `.stt_eval_runs/readnet_disputes.csv` as candidate field cases. Audio is
+never stored. `py -m readnet.tests.test_web` runs a full session over the API.
 
 ## Command line
 
