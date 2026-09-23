@@ -198,3 +198,15 @@ td.deva { font-size: 1rem; }
 .chip.lowgop { box-shadow: inset 0 -3px 0 var(--warn); }
 .gop-line { font-size: .85rem; color: var(--muted); margin: .6rem 0 0; }
 .notes { font-size: .88rem; color: var(--warn); background: var(--warn-soft); border: 1px solid var(--warn-line); border-radius: 8px; padding: .5rem .8rem; margin: 0 0 .8rem; }
+
+/* pipeline */
+.pipeline { margin: 0; padding-left: 1.3rem; font-size: .9rem; }
+.pipeline li { padding: .45rem 0; border-bottom: 1px solid var(--border); }
+.pipeline li:last-child { border-bottom: 0; }
+.stage { font-weight: 600; }
+.stage-body { color: var(--text); margin-top: .15rem; }
+.rule-row { margin: .15rem 0; }
+.rule-id { display: inline-block; font-size: .75rem; font-weight: 600; background: var(--accent-soft); color: var(--accent); border-radius: 5px; padding: 0 .4rem; margin-right: .35rem; }
+.arrow { color: var(--muted); font-size: .8rem; }
+.rule-result { color: var(--muted); margin-top: .15rem; }
+.muted-inline { color: var(--muted); }

@@ -247,9 +247,14 @@ def score(
     mapped: set[int] = set()
     if letter_task:
         # Map each spoken-letter spelling back onto its letter before aligning.
-        variants = {v: r for r in ref_tokens for v in profile.letter_variants(r) if v != r}
-        mapped = {j for j, h in enumerate(hyp_tokens) if h in variants}
-        hyp_tokens = [variants.get(h, h) for h in hyp_tokens]
+        # Any spelling of a spoken letter, not only of the expected ones: an
+        # engine that heard "गा" for घ heard the letter ग, which is then
+        # compared with घ like any other letter.
+        def as_letter(h: str) -> str:
+            return h[0] if h and h != h[0] and h in profile.letter_variants(h[0]) else h
+
+        mapped = {j for j, h in enumerate(hyp_tokens) if as_letter(h) != h}
+        hyp_tokens = [as_letter(h) for h in hyp_tokens]
 
     ops: list[WordOp] = []
     for kind, i, j in align(ref_tokens, hyp_tokens, word_sub_cost):

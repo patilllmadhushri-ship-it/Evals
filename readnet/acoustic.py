@@ -28,7 +28,7 @@ review and does not count them (see pipeline.py).
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Protocol, Sequence
+from typing import Callable, Protocol, Sequence
 
 import numpy as np
 
@@ -166,6 +166,56 @@ def closed_set_decision(
     rivals = [v for k, v in scores.items() if k != expected]
     margin = scores[expected] - max(rivals) if rivals else float("inf")
     return ClosedSetDecision(expected, best, scores, margin)
+
+
+def letter_decisions(
+    log_probs: np.ndarray,
+    letters: Sequence[str],
+    confusions: Callable[[str], Sequence[str]],
+    vocab: dict[str, int],
+    blank: int = 0,
+    word_delimiter: str | None = "|",
+    spoken_vowel: str | None = "ा",
+) -> list[ClosedSetDecision]:
+    """One closed-set decision per letter of a letter task.
+
+    Forced alignment finds roughly where each letter was said; each letter's
+    stretch of audio (out to the midpoints with its neighbours) is then scored
+    against the expected letter and its known confusions only. A child says क
+    as "ka", which a model may hear as क or का, so each candidate is also tried
+    with `spoken_vowel` and the better of the two counts.
+    """
+    target = targets_for_words(letters, vocab, word_delimiter)
+    spans = ctc_forced_align(log_probs, target.ids, blank)
+    starts = [spans[a].start for a, _ in target.word_ranges]
+    ends = [spans[b - 1].end for _, b in target.word_ranges]
+    frames = len(log_probs)
+    decisions: list[ClosedSetDecision] = []
+    for k, letter in enumerate(letters):
+        lo = 0 if k == 0 else (ends[k - 1] + starts[k]) // 2
+        hi = frames if k == len(letters) - 1 else (ends[k] + starts[k + 1]) // 2
+        window = log_probs[lo:hi]
+        best_by_letter: dict[str, float] = {}
+        for candidate in dict.fromkeys([letter, *confusions(letter)]):
+            forms = [candidate] + ([candidate + spoken_vowel] if spoken_vowel and spoken_vowel in vocab else [])
+            scores = []
+            for form in forms:
+                ids = [vocab[ch] for ch in form if ch in vocab]
+                if len(ids) != len(form):
+                    continue
+                try:
+                    scores.append(ctc_path_score(window, ids, blank))
+                except ValueError:
+                    continue
+            if scores:
+                best_by_letter[candidate] = max(scores)
+        if letter not in best_by_letter:
+            raise ValueError(f"The model's vocabulary cannot represent {letter!r}")
+        best = max(best_by_letter, key=best_by_letter.get)
+        rivals = [v for c, v in best_by_letter.items() if c != letter]
+        margin = best_by_letter[letter] - max(rivals) if rivals else float("inf")
+        decisions.append(ClosedSetDecision(letter, best, best_by_letter, margin))
+    return decisions
 
 
 # -- text <-> model tokens --------------------------------------------------------
