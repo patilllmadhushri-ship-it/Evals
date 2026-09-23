@@ -179,6 +179,10 @@ async function loadConfig(language) {
   $("engine").innerHTML = state.config.engines.map((e) => `<option value="${e.key}">${esc(e.label)}</option>`).join("");
   if (state.config.engines.some((e) => e.key === previous)) $("engine").value = previous;
   $("model-id").value = state.config.default_local_model;
+  $("gop-on").checked = state.config.gop_available;
+  $("gop-note").textContent = state.config.gop_available ? "" :
+    (state.config.engines.find((e) => e.key === "local")?.note || "");
+  $("gop-fields").hidden = !$("gop-on").checked && state.config.gop_available;
   $("quick-text").value = language === "hi" ? "चाँद और गाँव" : "माझे घर";
   onEngineChange();
 }
@@ -186,7 +190,6 @@ async function loadConfig(language) {
 function onEngineChange() {
   const engine = state.config.engines.find((e) => e.key === currentEngine());
   $("engine-note").textContent = engine?.note || "";
-  $("local-fields").hidden = currentEngine() !== "local";
   taskRecorder?.render();
   quickRecorder?.render();
   if (currentEngine() === "typed" && quickRecorder) {
@@ -200,13 +203,14 @@ function onEngineChange() {
 function wordChips(result) {
   return result.ops.map((op) => {
     const gop = op.gop != null ? ` · GOP ${op.gop.toFixed(1)}` : "";
+    const low = op.gop != null && op.gop < Number($("gop").value) ? " lowgop" : "";
     if (op.kind === "match") {
-      if (op.rule || op.note) return `<span class="chip forgiven">${esc(op.ref)}<small>${esc(op.rule)}${esc(op.note ? " · " + op.note : "")}${gop}</small></span>`;
-      return `<span class="chip ok">${esc(op.ref)}<small>read${gop}</small></span>`;
+      if (op.rule || op.note) return `<span class="chip forgiven${low}">${esc(op.ref)}<small>${esc(op.rule)}${esc(op.note ? " · " + op.note : "")}${gop}</small></span>`;
+      return `<span class="chip ok${low}">${esc(op.ref)}<small>read${gop}</small></span>`;
     }
     if (op.kind === "substitution") {
       const why = op.counts_as_mistake ? (op.subtypes.join("/") || op.category) : op.rule;
-      return `<span class="chip ${op.counts_as_mistake ? "bad" : "forgiven"}">${esc(op.ref)}<small>heard ${esc(op.hyp)} · ${esc(why)}${gop}</small></span>`;
+      return `<span class="chip ${op.counts_as_mistake ? "bad" : "forgiven"}${low}">${esc(op.ref)}<small>heard ${esc(op.hyp)} · ${esc(why)}${gop}</small></span>`;
     }
     if (op.kind === "deletion") return `<span class="chip bad"><span class="struck">${esc(op.ref)}</span><small>not read</small></span>`;
     const label = op.rule ? `${op.category} · ${op.rule}` : op.category;
@@ -235,8 +239,10 @@ function resultCard(result, engineLabel) {
     </div>
     <p class="reasons">${esc(o.reasons.join(" · "))}</p>
     <p class="heard"><b>Heard</b> (${esc(engineLabel)}): <span>${esc(result.transcript) || "nothing"}</span></p>
+    ${result.notes?.length ? `<div class="notes">${result.notes.map(esc).join("<br>")}</div>` : ""}
     ${pace}${doubts}${LEGEND}
     <div class="words">${wordChips(result)}</div>
+    ${gopLine(result)}
     <details><summary>Show the working</summary><div class="inner">
       <p><b>Text after normalisation:</b> <span class="deva">${esc(result.canonical_normalized)}</span></p>
       <p><b>Heard after normalisation:</b> <span class="deva">${esc(result.transcript_normalized)}</span></p>
@@ -244,6 +250,15 @@ function resultCard(result, engineLabel) {
     </div></details>
     <div class="result-extra"></div>
   </div>`;
+}
+
+function gopLine(result) {
+  if (!result.gop_ran) return "";
+  const scored = result.ops.filter((op) => op.gop != null);
+  const low = scored.filter((op) => op.gop < Number($("gop").value));
+  return `<p class="gop-line">Pronunciation (GOP) scored on ${scored.length} words. ${low.length
+    ? `${low.length} below the threshold, underlined: <span class="deva">${esc(low.map((op) => op.ref).join(", "))}</span>.`
+    : "None below the threshold."} GOP near 0 means the audio matches the expected sound; strongly negative means it does not.</p>`;
 }
 
 function engineLabel() {
@@ -254,14 +269,15 @@ function engineLabel() {
 async function score(level, text, recorder, target) {
   const status = document.createElement("p");
   status.className = "status";
-  status.textContent = currentEngine() === "typed" ? "Scoring..." : "Listening...";
+  status.textContent = currentEngine() === "typed" ? "Scoring..." :
+    $("gop-on").checked ? "Listening and checking pronunciation... (the first time loads the model, which can take a few minutes)" : "Listening...";
   target.innerHTML = "";
   target.appendChild(status);
   try {
     const result = await api("/api/score", {
       language: state.language, level, text, engine: currentEngine(),
       typed: recorder.typed, audio_b64: recorder.audio?.b64, filename: recorder.audio?.filename,
-      model_id: $("model-id").value, gop_threshold: Number($("gop").value),
+      model_id: $("model-id").value, gop_threshold: Number($("gop").value), gop: $("gop-on").checked,
     });
     target.innerHTML = resultCard(result, engineLabel());
     return result;
@@ -452,6 +468,7 @@ document.querySelectorAll(".tab").forEach((tab) => tab.addEventListener("click",
 }));
 
 $("engine").addEventListener("change", onEngineChange);
+$("gop-on").addEventListener("change", () => { $("gop-fields").hidden = !$("gop-on").checked; });
 $("gop").addEventListener("input", () => { $("gop-value").textContent = Number($("gop").value).toFixed(1); });
 $("new-child").addEventListener("click", () => { $("child").value = ""; resetSession(); });
 $("edit-text").addEventListener("click", () => {
