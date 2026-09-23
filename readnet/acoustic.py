@@ -17,8 +17,8 @@ against the *expected* text directly:
 This module is pure numpy and model-agnostic: it takes a ``(frames, vocab)``
 log-probability matrix. `EmissionModel` is the one seam where a trained model
 plugs in; `Wav2Vec2Emissions` is an adapter for Hugging Face CTC checkpoints
-(for example ``ai4bharat/indicwav2vec-hindi``) and needs ``torch`` and
-``transformers`` installed.
+(``DEFAULT_MODELS``: the ungated Vakyansh Hindi and Marathi models) and needs
+``torch`` and ``transformers`` installed.
 
 GOP thresholds must be calibrated on labelled child audio before they are
 allowed to fail anyone. Until then the pipeline reports low-GOP words for
@@ -88,7 +88,7 @@ def _viterbi(log_probs: np.ndarray, targets: Sequence[int], blank: int) -> tuple
     path = np.empty(T, dtype=np.int64)
     for t in range(T - 1, -1, -1):
         path[t] = s
-        s -= back[t, s]
+        s -= int(back[t, s])  # int(): an int8 step would turn `s` into int8 and overflow past 127 states
 
     spans: list[TokenSpan] = []
     for token_index in range(L):
@@ -291,18 +291,39 @@ class EmissionModel(Protocol):
     def emissions(self, wav_bytes: bytes) -> Emissions: ...
 
 
+#: Ungated Hugging Face CTC checkpoints that download with no terms to accept.
+DEFAULT_MODELS = {
+    "hi": "Harveenchadha/vakyansh-wav2vec2-hindi-him-4200",
+    "mr": "Harveenchadha/vakyansh-wav2vec2-marathi-mrm-100",
+}
+
+
+def hf_token() -> str | None:
+    import os
+
+    for name in ("HF_TOKEN", "HUGGINGFACE_TOKEN", "HUGGING_FACE_HUB_TOKEN"):
+        if os.environ.get(name):
+            return os.environ[name]
+    return None
+
+
 class Wav2Vec2Emissions:
     """Hugging Face wav2vec2-CTC adapter. Requires torch + transformers.
 
-    Not exercised by the offline test suite — it needs a model download.
+    Loads the plain processor (feature extractor + CTC tokenizer), not an
+    n-gram decoder a repo may bundle: forced alignment and GOP need the raw
+    frame posteriors, not a language model's opinion of them. Passes the
+    Hugging Face token from the environment, for gated checkpoints.
     """
 
-    def __init__(self, model_id: str = "ai4bharat/indicwav2vec-hindi"):
+    def __init__(self, model_id: str = DEFAULT_MODELS["hi"]):
         import torch  # noqa: F401  (fail fast with a clear ImportError)
-        from transformers import AutoModelForCTC, AutoProcessor
+        from transformers import AutoModelForCTC, Wav2Vec2CTCTokenizer, Wav2Vec2FeatureExtractor
 
-        self.processor = AutoProcessor.from_pretrained(model_id)
-        self.model = AutoModelForCTC.from_pretrained(model_id).eval()
+        token = hf_token()
+        self.feature_extractor = Wav2Vec2FeatureExtractor.from_pretrained(model_id, token=token)
+        self.tokenizer = Wav2Vec2CTCTokenizer.from_pretrained(model_id, token=token)
+        self.model = AutoModelForCTC.from_pretrained(model_id, token=token).eval()
 
     def emissions(self, wav_bytes: bytes) -> Emissions:
         import io
@@ -313,16 +334,31 @@ class Wav2Vec2Emissions:
         samples, rate = sf.read(io.BytesIO(wav_bytes), dtype="float32")
         if samples.ndim > 1:
             samples = samples.mean(axis=1)
-        inputs = self.processor(samples, sampling_rate=rate, return_tensors="pt")
+        inputs = self.feature_extractor(samples, sampling_rate=rate, return_tensors="pt")
         with torch.no_grad():
-            logits = self.model(**inputs).logits[0]
+            logits = self.model(inputs.input_values).logits[0]
         log_probs = torch.log_softmax(logits, dim=-1).numpy()
-        tokenizer = self.processor.tokenizer
         seconds = len(samples) / rate
+        vocab = self.tokenizer.get_vocab()
         return Emissions(
             log_probs=log_probs,
-            vocab=tokenizer.get_vocab(),
+            vocab=vocab,
             frame_seconds=seconds / log_probs.shape[0],
-            blank=tokenizer.pad_token_id or 0,
-            word_delimiter=getattr(tokenizer, "word_delimiter_token", "|"),
+            blank=detect_blank(log_probs, vocab, self.tokenizer.pad_token_id or 0),
+            word_delimiter=getattr(self.tokenizer, "word_delimiter_token", "|"),
         )
+
+
+def detect_blank(log_probs: np.ndarray, vocab: dict[str, int], configured: int) -> int:
+    """The CTC blank is whichever special token the model actually emits most.
+
+    Checkpoints converted from fairseq train with `<s>` (id 0) as the blank but
+    ship a config naming `<pad>` (id 1). Trusting the config makes forced
+    alignment stretch every letter over silent frames and GOP compare each
+    letter against silence, so the whole score is wrong. In CTC output the
+    blank wins most frames, so let the model say which one it is.
+    """
+    special = {i for tok, i in vocab.items() if tok.startswith("<") and tok.endswith(">")}
+    counts = np.bincount(np.argmax(log_probs, axis=1), minlength=log_probs.shape[1])
+    busiest = int(np.argmax(counts))
+    return busiest if busiest in special else configured

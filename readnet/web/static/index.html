@@ -27,16 +27,24 @@
         <select id="engine"></select>
         <span class="field-note" id="engine-note"></span>
       </label>
-      <div id="local-fields" hidden>
-        <label class="field">
-          <span class="field-label">Hugging Face CTC model</span>
-          <input id="model-id" type="text" spellcheck="false">
+      <div class="gop-box">
+        <label class="check">
+          <input id="gop-on" type="checkbox" checked>
+          <span><b>Pronunciation check (GOP)</b><br>
+            <span class="field-note">Scores every word of the text against the recording, whichever engine writes the transcript.</span></span>
         </label>
-        <label class="field">
-          <span class="field-label">Flag words with GOP below <b id="gop-value">-3.0</b></span>
-          <input id="gop" type="range" min="-10" max="2" step="0.5" value="-3">
-          <span class="field-note">Uncalibrated. Flagged words are shown for review, never counted.</span>
-        </label>
+        <div id="gop-fields">
+          <label class="field">
+            <span class="field-label">Model</span>
+            <input id="model-id" type="text" spellcheck="false">
+          </label>
+          <label class="field">
+            <span class="field-label">Flag words with GOP below <b id="gop-value">0.0</b></span>
+            <input id="gop" type="range" min="-10" max="2" step="0.5" value="0">
+            <span class="field-note">Uncalibrated. Flagged words are shown for review, never counted.</span>
+          </label>
+          <span class="field-note" id="gop-note"></span>
+        </div>
       </div>
       <label class="field">
         <span class="field-label">Child (optional, not saved)</span>

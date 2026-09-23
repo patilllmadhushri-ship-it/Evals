@@ -36,6 +36,7 @@ from stt_eval import env, providers
 from stt_eval.providers import ProviderError
 
 from .. import languages
+from ..acoustic import DEFAULT_MODELS
 from ..aser import Level, TaskOutcome, next_task, place
 from ..pipeline import assess_task
 from .content import CONTENT, NEXT_STEPS, TASKS
@@ -43,7 +44,8 @@ from .content import CONTENT, NEXT_STEPS, TASKS
 STATIC = Path(__file__).with_name("static")
 DISPUTE_LOG = Path(".stt_eval_runs") / "readnet_disputes.csv"
 LOCALES = {"hi": "hi-IN", "mr": "mr-IN"}
-DEFAULT_LOCAL_MODEL = {"hi": "ai4bharat/indicwav2vec-hindi", "mr": ""}
+#: Engines that reject long audio in one request: split it, at a quiet moment.
+MAX_SECONDS = {"sarvam": 29.0}
 TYPED, LOCAL = "typed", "local"
 #: Indic-first engines first: Sarvam is built for Hindi and Marathi.
 PREFERRED = ["sarvam", "google", "deepgram", "elevenlabs", "openai", "mock"]
@@ -91,7 +93,7 @@ def engines(language: str) -> list[dict]:
                         "note": "Drops words at random from the screen text. For trying the flow without a microphone."})
         elif env.provider_key(key):
             out.append({"key": key, "label": f"{providers.provider_label(key)} (cloud)", "note": ""})
-    out.append({"key": LOCAL, "label": "Local model (wav2vec2, with word timings and GOP)",
+    out.append({"key": LOCAL, "label": "Local model (wav2vec2, runs on this machine)",
                 "note": local_model_problem()})
     out.append({"key": TYPED, "label": "No speech engine: type what the child said", "note": ""})
     return out
@@ -104,35 +106,109 @@ def load_local_model(model_id: str):
     return Wav2Vec2Emissions(model_id)
 
 
-def transcribe(engine: str, audio: bytes | None, filename: str, canonical: str, language: str, model_id: str):
-    """Returns (transcript, seconds, acoustic evidence or None)."""
+def split_wav(wav_bytes: bytes, max_seconds: float) -> list[bytes]:
+    """Cut mono 16-bit WAV into pieces under `max_seconds`, each cut at the
+    quietest 100 ms in the last third of the window, so no word is sliced."""
+    import io
+    import wave
+
+    import numpy as np
+
+    with wave.open(io.BytesIO(wav_bytes)) as w:
+        rate = w.getframerate()
+        samples = np.frombuffer(w.readframes(w.getnframes()), dtype=np.int16)
+    limit, step = int(max_seconds * rate), int(0.1 * rate)
+    pieces, start = [], 0
+    while len(samples) - start > limit:
+        lo, hi = start + int(limit * 0.66), start + limit - step
+        energies = [np.abs(samples[i : i + step].astype(np.int32)).mean() for i in range(lo, hi, step)]
+        cut = lo + step * int(np.argmin(energies)) + step // 2
+        pieces.append(samples[start:cut])
+        start = cut
+    pieces.append(samples[start:])
+    out = []
+    for piece in pieces:
+        buf = io.BytesIO()
+        with wave.open(buf, "wb") as w:
+            w.setnchannels(1)
+            w.setsampwidth(2)
+            w.setframerate(rate)
+            w.writeframes(piece.tobytes())
+        out.append(buf.getvalue())
+    return out
+
+
+def gop_evidence(wav_bytes: bytes, canonical: str, language: str, model_id: str):
+    """Forced alignment + GOP of the audio against the expected text."""
+    from ..acoustic import evidence_for_words
+
+    em = load_local_model(model_id or DEFAULT_MODELS[language]).emissions(wav_bytes)
+    words = languages.get(language).normalize(canonical)[0].split()
+    return evidence_for_words(em.log_probs, words, em.vocab, frame_seconds=em.frame_seconds,
+                              blank=em.blank, word_delimiter=em.word_delimiter), em
+
+
+def transcribe(engine: str, audio: bytes | None, filename: str, canonical: str, language: str,
+               model_id: str, with_gop: bool):
+    """Returns (transcript, seconds, acoustic evidence or None, notes).
+
+    GOP runs on every engine that has audio when `with_gop` is set: the chosen
+    engine writes the transcript, and the local model scores each expected
+    word's pronunciation against the same recording.
+    """
     started = time.perf_counter()
+    notes: list[str] = []
     if engine == "mock":
         mock = providers.build("mock", "")
         mock._ground_truth_hint = canonical
         text = mock.transcribe(audio or canonical.encode("utf-8"), LOCALES[language]).text
-        return text, time.perf_counter() - started, None
+        if with_gop:
+            notes.append("GOP needs a real recording; Mock has none.")
+        return text, time.perf_counter() - started, None, notes
     if not audio:
         raise ApiError("Record or upload the child's reading first.")
 
     clip = stt_audio.normalize(audio, filename or "recording.wav", sample_rate=16000)
-    if engine == LOCAL:
-        if not local_model_available():
-            raise ApiError(local_model_problem())
-        if not model_id:
-            raise ApiError("Enter a Hugging Face CTC model id for this language.")
-        from ..acoustic import evidence_for_words, greedy_decode
+    evidence = em = None
+    if with_gop or engine == LOCAL:
+        problem = local_model_problem()
+        if problem:
+            if engine == LOCAL:
+                raise ApiError(problem)
+            notes.append(f"GOP skipped: {problem}")
+        else:
+            try:
+                evidence, em = gop_evidence(clip.wav_bytes, canonical, language, model_id)
+            except ValueError as error:  # recording too short for the text
+                notes.append(f"GOP skipped: {error}")
+            except OSError as error:
+                raise ApiError(model_error(model_id or DEFAULT_MODELS[language], error)) from error
 
-        em = load_local_model(model_id).emissions(clip.wav_bytes)
-        words = languages.get(language).normalize(canonical)[0].split()
-        evidence = evidence_for_words(em.log_probs, words, em.vocab, frame_seconds=em.frame_seconds,
-                                      blank=em.blank, word_delimiter=em.word_delimiter)
-        return greedy_decode(em), time.perf_counter() - started, evidence
+    if engine == LOCAL:
+        from ..acoustic import greedy_decode
+
+        return greedy_decode(em), time.perf_counter() - started, evidence, notes
 
     if engine not in providers.PROVIDER_CLASSES or not env.provider_key(engine):
         raise ApiError(f"No key configured for {engine}.")
     provider = providers.build(engine, env.provider_key(engine))
-    return provider.transcribe(clip.wav_bytes, LOCALES[language]).text, time.perf_counter() - started, None
+    limit = MAX_SECONDS.get(engine)
+    pieces = split_wav(clip.wav_bytes, limit) if limit and clip.duration_seconds > limit else [clip.wav_bytes]
+    if len(pieces) > 1:
+        notes.append(f"Recording is {clip.duration_seconds:.0f}s; sent to {engine} in {len(pieces)} parts.")
+    text = " ".join(provider.transcribe(piece, LOCALES[language]).text for piece in pieces)
+    if not text.strip():
+        notes.append("The engine returned no words. Check the recording has speech in it.")
+    return text, time.perf_counter() - started, evidence, notes
+
+
+def model_error(model_id: str, error: Exception) -> str:
+    message = str(error)
+    if "gated" in message or "401" in message or "403" in message:
+        return (f"The model {model_id} is gated: log in at huggingface.co, open the model page and accept "
+                f"its terms, with HUGGINGFACE_TOKEN in .env. Or clear the model field to use the ungated "
+                f"default ({DEFAULT_MODELS.get('hi')}).")
+    return f"Could not load the local model {model_id}: {message[:300]}"
 
 
 # -- API handlers -----------------------------------------------------------------------
@@ -159,7 +235,8 @@ def api_config(query: dict) -> dict:
         "languages": [{"code": c, "name": languages.get(c).name} for c in LOCALES],
         "language": language,
         "engines": engines(language),
-        "default_local_model": DEFAULT_LOCAL_MODEL[language],
+        "default_local_model": DEFAULT_MODELS[language],
+        "gop_available": local_model_available(),
         "content": {level.name: text for level, text in CONTENT[language].items()},
         "tasks": {level.name: copy for level, copy in TASKS.items()},
     }
@@ -176,14 +253,17 @@ def api_score(body: dict) -> dict:
         raise ApiError("The text shown to the child is empty.")
     engine = str(body.get("engine") or TYPED)
     gop_threshold = body.get("gop_threshold")
+    with_gop = bool(body.get("gop", True))
+    notes: list[str] = []
 
     if engine == TYPED:
         transcript, seconds, evidence = str(body.get("typed") or ""), 0.0, None
     else:
         audio = base64.b64decode(body["audio_b64"]) if body.get("audio_b64") else None
         try:
-            transcript, seconds, evidence = transcribe(
-                engine, audio, str(body.get("filename") or ""), text, language, str(body.get("model_id") or "")
+            transcript, seconds, evidence, notes = transcribe(
+                engine, audio, str(body.get("filename") or ""), text, language, str(body.get("model_id") or ""),
+                with_gop,
             )
         except (ProviderError, stt_audio.AudioError, OSError, ImportError, ValueError) as error:
             raise ApiError(f"Could not transcribe: {error}", HTTPStatus.BAD_GATEWAY) from error
@@ -209,6 +289,8 @@ def api_score(body: dict) -> dict:
         "transcript_normalized": item.transcript_normalized,
         "changes": [{"rule": r, "before": b, "after": a} for r, b, a in item.transcript_trace.steps],
         "acoustic_doubts": item.acoustic_doubts,
+        "gop_ran": evidence is not None,
+        "notes": notes,
         "mistake_profile": dict(item.result.mistake_profile),
         "ops": ops,
     }

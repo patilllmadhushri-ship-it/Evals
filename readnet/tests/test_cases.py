@@ -215,6 +215,14 @@ def test_ctc_forced_alignment_finds_the_boundaries():
     assert [(s.start, s.end) for s in spans] == [(1, 3), (4, 7), (7, 8)]
 
 
+def test_ctc_aligns_long_sequences():
+    # 100 tokens = 201 CTC states: past int8, which once overflowed the backtrack.
+    targets = [1 + (i % 5) for i in range(100)]
+    frames = [f for t in targets for f in (t, t, 0)]
+    spans = ctc_forced_align(_emissions(frames, 6), targets)
+    assert [(s.start, s.end) for s in spans] == [(3 * i, 3 * i + 2) for i in range(100)]
+
+
 def test_ctc_handles_repeated_tokens():
     log_probs = _emissions([1, 1, 0, 1, 1], 3)
     spans = ctc_forced_align(log_probs, [1, 1])

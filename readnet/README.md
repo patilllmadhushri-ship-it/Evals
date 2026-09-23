@@ -20,11 +20,22 @@ each task aloud; the page records WAV in the browser. The app then
 transcribes, colours every word (read right / forgiven, with the rule id /
 mistake / extra sound), and walks the ASER order to a level.
 
-The local model is the one that adds word timings and GOP. It needs `torch` and
-`transformers`, and on Windows also the Microsoft Visual C++ Redistributable;
-the engine list says which is missing. Each verdict can be disputed; disputes
-go to `.stt_eval_runs/readnet_disputes.csv` as candidate field cases. Audio is
-never stored. `py -m readnet.tests.test_web` runs a full session over the API.
+**Pronunciation check (GOP) runs on every reading**, whichever engine writes
+the transcript. A local wav2vec2 model force-aligns the recording to the text
+on screen, times every word, and scores how well each word's audio matches
+the expected sounds. The default models are the ungated Vakyansh checkpoints
+(`acoustic.DEFAULT_MODELS`), about 1.2 GB, downloaded on first use. Low-GOP
+words are underlined and listed for review, never counted as mistakes, until
+the threshold is calibrated on labelled child audio. On two synthetic Hindi
+readings, every correctly read word scored above 0 and the misread words
+scored between -8 and -2, so 0 is the starting threshold.
+
+This needs `torch` and `transformers`, and on Windows the Microsoft Visual C++
+Redistributable; the page says which is missing. Sarvam accepts at most 30
+seconds per request, so longer recordings are split at quiet moments and
+sent in parts. Each verdict can be disputed; disputes go to
+`.stt_eval_runs/readnet_disputes.csv` as candidate field cases. Audio is never
+stored. `py -m readnet.tests.test_web` runs a full session over the API.
 
 ## Command line
 
