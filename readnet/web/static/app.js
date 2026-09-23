@@ -241,6 +241,7 @@ function resultCard(result, engineLabel) {
     ${pace}${doubts}${LEGEND}
     <div class="words">${wordChips(result)}</div>
     ${gopLine(result)}
+    ${soundsView(result)}
     ${pipelineView(result)}
     <div class="result-extra"></div>
   </div>`;
@@ -275,6 +276,23 @@ function pipelineView(result) {
     return `<li><div class="stage">${esc(step.stage)}</div><div class="stage-body">${body}</div></li>`;
   }).join("");
   return `<h3 class="section-title">How this was scored</h3><ol class="pipeline">${steps}</ol>`;
+}
+
+function soundsView(result) {
+  const words = result.ops.filter((op) => op.units && op.units.length);
+  if (!words.length) return "";
+  const threshold = Number($("gop").value);
+  const rows = words.map((op) => `<tr>
+      <td class="deva">${esc(op.ref)}</td>
+      <td>${op.start_s.toFixed(2)}–${op.end_s.toFixed(2)}s</td>
+      <td class="deva">/${esc(op.units.map((u) => u.sounds).filter(Boolean).join(" "))}/</td>
+      <td><div class="units">${op.units.filter((u) => u.sounds).map((u) => `<span class="unit${u.gop < threshold ? " low" : ""}">
+          <b>/${esc(u.sounds)}/</b>${u.letter ? `<small class="deva">${esc(u.letter)}</small>` : ""}<small>${u.start_s.toFixed(2)}–${u.end_s.toFixed(2)}s</small><small>GOP ${u.gop > 0 ? "+" : ""}${u.gop}</small></span>`).join("")}</div></td>
+    </tr>`).join("");
+  return `<details class="sounds" open><summary>Sounds: forced alignment and GOP per phoneme</summary><div class="inner">
+    <p class="gop-line">Each word is turned into its sounds (G2P), the recording is cut into 20 ms frames, forced alignment finds which frames carry each sound, and each sound gets a GOP: how much better the expected sound fits its frames than the strongest other sound. Red is below the threshold. With the Hindi model, an unwritten /ə/ shares its consonant's frames and score (shown together, e.g. /ɡʰ ə/).</p>
+    <div class="table-wrap"><table><tr><th>Word</th><th>Said at</th><th>G2P</th><th>Each sound: time and GOP</th></tr>${rows}</table></div>
+  </div></details>`;
 }
 
 function gopLine(result) {

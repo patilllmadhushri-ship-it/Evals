@@ -37,7 +37,8 @@ from stt_eval import env, providers
 from stt_eval.providers import ProviderError
 
 from .. import languages
-from ..acoustic import DEFAULT_MODELS
+from .. import g2p
+from ..acoustic import DEFAULT_MODELS, PHONEME_MODEL
 from ..aser import Level, TaskOutcome, next_task, place
 from ..confusion import hand_made_confusions
 from ..pipeline import assess_task, is_letter_text
@@ -140,14 +141,70 @@ def split_wav(wav_bytes: bytes, max_seconds: float) -> list[bytes]:
     return out
 
 
+def is_phoneme_model(vocab: dict[str, int]) -> bool:
+    return "ə" in vocab
+
+
 def gop_evidence(wav_bytes: bytes, canonical: str, language: str, model_id: str):
-    """Forced alignment + GOP of the audio against the expected text."""
+    """Forced alignment + GOP of the audio against the expected text.
+
+    Default: the Hindi (or Marathi) letter model, which was trained on
+    thousands of hours of the language and separates right from wrong
+    reading. Each aligned letter is labelled with the sounds G2P says it
+    stands for (घ -> /ɡʰ ə/), so the result reads sound by sound; the unwritten
+    /ə/ shares its consonant's frames and score, because this model hears
+    them as one unit.
+
+    A phoneme model (IPA output, e.g. PHONEME_MODEL) aligns G2P's sounds
+    directly, /ə/ included — but the multilingual one tested here separated
+    right from wrong Hindi reading poorly, so it is opt-in.
+    """
     from ..acoustic import evidence_for_words
 
     em = load_local_model(model_id or DEFAULT_MODELS[language]).emissions(wav_bytes)
     words = languages.get(language).normalize(canonical)[0].split()
-    return evidence_for_words(em.log_probs, words, em.vocab, frame_seconds=em.frame_seconds,
-                              blank=em.blank, word_delimiter=em.word_delimiter), em
+    if is_phoneme_model(em.vocab):
+        evidence = evidence_for_words(em.log_probs, words, em.vocab, frame_seconds=em.frame_seconds,
+                                      blank=em.blank, word_delimiter=None,
+                                      units=[g2p.word_to_phonemes(w) for w in words])
+    else:
+        evidence = evidence_for_words(em.log_probs, words, em.vocab, frame_seconds=em.frame_seconds,
+                                      blank=em.blank, word_delimiter=em.word_delimiter)
+    return evidence, em
+
+
+def unit_rows(word: str, units, phoneme_units: bool) -> list[dict]:
+    """Each aligned unit of `word`, labelled with the sounds it stands for.
+
+    For a letter model, G2P's per-letter sounds: घ -> "ɡʰ ə". Letters come
+    back in word order (minus any the model's vocabulary lacks), so they are
+    matched to their positions in the word by walking it.
+    """
+    sounds = g2p.letter_sounds(word) if not phoneme_units else []
+    rows, pos = [], 0
+    for u in units:
+        label = u.unit
+        if not phoneme_units:
+            while pos < len(word) and word[pos] != u.unit:
+                pos += 1
+            if pos < len(word):
+                label = sounds[pos]
+                pos += 1
+        rows.append({"letter": None if phoneme_units else u.unit, "sounds": label,
+                     "start_s": round(u.start_s, 2), "end_s": round(u.end_s, 2), "gop": round(u.llr, 1)})
+    return rows
+
+
+def letter_forms(em):
+    """How a spoken letter may sound, in the model's units."""
+    if not is_phoneme_model(em.vocab):
+        return None  # letter model: the letter, or letter + ा
+    def forms(letter: str):
+        sounds = g2p.word_to_phonemes(letter)
+        if len(sounds) == 2 and sounds[1] == g2p.SCHWA:  # a consonant: "ka", "kaa", or just /k/
+            return [sounds, [sounds[0], "aː"], [sounds[0]]]
+        return [sounds]
+    return forms
 
 
 def transcribe(engine: str, audio: bytes | None, filename: str, canonical: str, language: str,
@@ -189,7 +246,9 @@ def transcribe(engine: str, audio: bytes | None, filename: str, canonical: str, 
     if engine == LOCAL:
         from ..acoustic import greedy_decode
 
-        return greedy_decode(em), time.perf_counter() - started, evidence, notes, em
+        # The transcript comes from the letter model; GOP above from the phoneme model.
+        letters_em = load_local_model(DEFAULT_MODELS[language]).emissions(clip.wav_bytes)
+        return greedy_decode(letters_em), time.perf_counter() - started, evidence, notes, em
 
     if engine not in providers.PROVIDER_CLASSES or not env.provider_key(engine):
         raise ApiError(f"No key configured for {engine}.")
@@ -238,6 +297,7 @@ def api_config(query: dict) -> dict:
         "language": language,
         "engines": engines(language),
         "default_local_model": DEFAULT_MODELS[language],
+        "phoneme_model": PHONEME_MODEL,
         "gop_available": local_model_available(),
         "content": {level.name: text for level, text in CONTENT[language].items()},
         "tasks": {level.name: copy for level, copy in TASKS.items()},
@@ -284,7 +344,9 @@ def api_score(body: dict) -> dict:
 
         try:
             decisions = letter_decisions(em.log_probs, letters, lambda l: hand_made_confusions(l, profile.tables),
-                                         em.vocab, em.blank, em.word_delimiter)
+                                         em.vocab, em.blank,
+                                         None if is_phoneme_model(em.vocab) else em.word_delimiter,
+                                         forms=letter_forms(em))
             letter_check = [{"letter": d.expected, "heard": d.best, "margin": round(d.margin, 1),
                              "candidates": sorted(d.scores, key=d.scores.get, reverse=True)} for d in decisions]
             transcript = " ".join(d.best for d in decisions)
@@ -298,19 +360,25 @@ def api_score(body: dict) -> dict:
         gop_threshold=float(gop_threshold) if evidence and gop_threshold is not None else None,
     )
     item = items[0]
+    phoneme_units = em is not None and is_phoneme_model(em.vocab)
     ops = []
     for op in item.result.ops:
         entry = {k: v for k, v in op.__dict__.items()}
         entry["subtypes"] = list(op.subtypes)
         if evidence and op.ref_index is not None and op.ref_index < len(evidence.words):
             w = evidence.words[op.ref_index]
-            entry.update(start_s=w.start_s, end_s=w.end_s, gop=w.llr)
+            entry.update(start_s=w.start_s, end_s=w.end_s, gop=w.llr,
+                         units=unit_rows(op.ref, w.units, phoneme_units))
         ops.append(entry)
 
+    if evidence is not None and phoneme_units:
+        notes.append("Phoneme model: this multilingual model separated right from wrong Hindi reading poorly "
+                     "in testing. The default Hindi model is the more reliable judge.")
     kinds = Counter(op["kind"] for op in ops)
     gop_scored = [op for op in ops if op.get("gop") is not None]
     if evidence is not None:
-        gop_detail = (f"Ran on {len(gop_scored)} words with {body.get('model_id') or DEFAULT_MODELS[language]}. "
+        gop_detail = (f"Ran on {len(gop_scored)} words ({sum(len(op.get('units') or []) for op in gop_scored)} "
+                      f"sounds) with {body.get('model_id') or DEFAULT_MODELS[language]}. "
                       f"{sum(1 for op in gop_scored if op['gop'] < float(gop_threshold or 0))} below the threshold.")
     elif engine == TYPED:
         gop_detail = "Not run: typed transcripts have no audio."

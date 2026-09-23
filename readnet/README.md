@@ -21,14 +21,25 @@ transcribes, colours every word (read right / forgiven, with the rule id /
 mistake / extra sound), and walks the ASER order to a level.
 
 **Pronunciation check (GOP) runs on every reading**, whichever engine writes
-the transcript. A local wav2vec2 model force-aligns the recording to the text
-on screen, times every word, and scores how well each word's audio matches
-the expected sounds. The default models are the ungated Vakyansh checkpoints
-(`acoustic.DEFAULT_MODELS`), about 1.2 GB, downloaded on first use. Low-GOP
-words are underlined and listed for review, never counted as mistakes, until
-the threshold is calibrated on labelled child audio. On two synthetic Hindi
-readings, every correctly read word scored above 0 and the misread words
-scored between -8 and -2, so 0 is the starting threshold.
+the transcript, and it works on sounds, not letters:
+
+```
+text on screen  घर
+  → G2P (readnet/g2p.py)        /ɡʰ ə ɾ/   (the /ə/ is never written)
+  → phoneme model, per 20 ms frame: probability of every sound
+  → forced alignment (Viterbi)  /ɡʰ/ 1.52–1.58s  /ə/ 1.58–1.62s  /ɾ/ 1.62–1.64s
+  → GOP per sound               how much better the expected sound fits its
+                                frames than the strongest other sound
+```
+
+The page shows this per word, sound by sound, with times and GOP. The
+phoneme model is `facebook/wav2vec2-xlsr-53-espeak-cv-ft` (ungated, IPA
+output, about 1.2 GB, downloaded on first use); a letter-level model can be
+entered instead and is detected automatically. For letter tasks the same
+model runs a closed-set check per letter: does this stretch of audio sound
+like /kʰ ə/ (ख) or one of its confusions, /k ə/, /ɡʰ ə/…? Low-GOP sounds are
+shown for review, never counted as mistakes, until the threshold is
+calibrated on labelled child audio.
 
 This needs `torch` and `transformers`, and on Windows the Microsoft Visual C++
 Redistributable; the page says which is missing. Sarvam accepts at most 30

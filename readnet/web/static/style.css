@@ -210,3 +210,11 @@ td.deva { font-size: 1rem; }
 .arrow { color: var(--muted); font-size: .8rem; }
 .rule-result { color: var(--muted); margin-top: .15rem; }
 .muted-inline { color: var(--muted); }
+
+/* per-phoneme view */
+.units { display: flex; flex-wrap: wrap; gap: .3rem; }
+.unit { border: 1px solid var(--ok-line); background: var(--ok-soft); border-radius: 6px; padding: .15rem .45rem; text-align: center; font-size: .82rem; }
+.unit b { font-weight: 600; font-family: "Inter", "Segoe UI", sans-serif; }
+.unit small { display: block; color: var(--muted); font-size: .68rem; line-height: 1.25; }
+.unit.low { border-color: var(--bad-line); background: var(--bad-soft); }
+.unit.low small { color: var(--bad); }
