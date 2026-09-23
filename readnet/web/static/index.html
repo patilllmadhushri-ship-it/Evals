@@ -52,17 +52,27 @@
         </div>
       </div>
       <label class="field">
-        <span class="field-label">Child (optional, not saved)</span>
-        <input id="child" type="text" placeholder="Name or ID">
+        <span class="field-label">Student</span>
+        <select id="student"></select>
       </label>
-      <button class="btn btn-secondary btn-block" id="new-child">New child</button>
-      <p class="fine-print">Audio is used once for scoring and never stored.</p>
+      <details class="add-student">
+        <summary>Add a student</summary>
+        <div class="inner">
+          <label class="field"><span class="field-label">Name or ID</span><input id="new-name" type="text"></label>
+          <label class="field"><span class="field-label">Class (optional)</span><input id="new-grade" type="text" placeholder="e.g. 3"></label>
+          <button class="btn btn-secondary btn-block" id="add-student" type="button">Add</button>
+          <span class="field-note" id="add-student-note"></span>
+        </div>
+      </details>
+      <button class="btn btn-secondary btn-block" id="new-child">Start a new test</button>
+      <p class="fine-print">Accepted readings are saved to the student's record on this computer: transcripts and scores, never audio.</p>
     </aside>
 
     <main class="main">
       <nav class="tabs" role="tablist">
         <button class="tab active" data-tab="assessment" role="tab">Assessment</button>
         <button class="tab" data-tab="quick" role="tab">Quick check</button>
+        <button class="tab" data-tab="students" role="tab">Students</button>
       </nav>
 
       <section id="tab-assessment" class="tab-panel">
@@ -89,6 +99,11 @@
         <div id="final-view" hidden></div>
       </section>
 
+      <section id="tab-students" class="tab-panel" hidden>
+        <div class="card" id="roster"></div>
+        <div id="student-detail"></div>
+      </section>
+
       <section id="tab-quick" class="tab-panel" hidden>
         <div class="card">
           <p class="muted">Score one reading against any text, to try a rule or a tricky word.</p>
@@ -110,6 +125,7 @@
         </div>
         <div class="card" id="quick-input"></div>
         <div id="quick-result"></div>
+        <div id="quick-save"></div>
       </section>
     </main>
   </div>

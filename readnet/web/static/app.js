@@ -361,7 +361,7 @@ function renderStepper(done) {
 function showTask() {
   const level = state.current;
   const copy = state.config.tasks[level];
-  const child = $("child").value.trim();
+  const child = studentName();
   $("final-view").hidden = true;
   $("task-view").hidden = false;
   renderStepper(false);
@@ -373,7 +373,8 @@ function showTask() {
   $("task-text-editor").hidden = true;
   $("edit-text").textContent = "Change text";
   state.pending = null;
-  $("task-result").innerHTML = "";
+  $("task-result").innerHTML = state.lastSaved ? `<p class="saved">${esc(state.lastSaved)}</p>` : "";
+  state.lastSaved = "";
   $("task-input").innerHTML = `<div class="recorder"></div>
     <div class="actions"><button class="btn btn-primary" id="score-btn" type="button">Score this reading</button></div>`;
   taskRecorder = new Recorder($("task-input").querySelector(".recorder"), {
@@ -417,10 +418,25 @@ async function scoreTask() {
   });
 }
 
+async function saveReading(level, text, result) {
+  const sid = studentId();
+  if (!sid) return "";
+  const saved = await api("/api/attempts", {
+    student_id: sid, language: state.language, task: level, text, result,
+    engine: currentEngine(), threshold: Number($("gop").value),
+  });
+  return `Saved to ${studentName()}'s record: ${saved.sounds_saved} sounds, ${saved.sounds_wrong} to practise.`;
+}
+
 async function accept() {
   const level = state.current;
   state.outcomes[level] = state.pending.outcome;
   state.results[level] = state.pending;
+  try {
+    state.lastSaved = await saveReading(level, taskText(level), state.pending);
+  } catch (err) {
+    state.lastSaved = `Not saved: ${err.message}`;
+  }
   const next = await api("/api/next", { outcomes: state.outcomes });
   if (next.next) {
     state.current = next.next;
@@ -432,7 +448,10 @@ async function accept() {
 }
 
 function showFinal(placement) {
-  const child = $("child").value.trim();
+  const child = studentName();
+  if (studentId()) {
+    api("/api/sessions", { student_id: studentId(), language: state.language, placement }).catch(() => {});
+  }
   $("task-view").hidden = true;
   $("final-view").hidden = false;
   renderStepper(true);
@@ -470,6 +489,7 @@ function showFinal(placement) {
       ${detail}
       <div class="actions">
         <button class="btn btn-secondary" id="download-btn" type="button">Download result</button>
+        ${studentId() ? `<button class="btn btn-secondary" id="open-record" type="button">Open ${esc(child)}'s record</button>` : ""}
         <button class="btn btn-primary" id="another-btn" type="button">Test another child</button>
       </div>
     </div>`;
@@ -481,7 +501,8 @@ function showFinal(placement) {
     a.click();
     URL.revokeObjectURL(url);
   });
-  $("another-btn").addEventListener("click", () => { $("child").value = ""; resetSession(); });
+  $("another-btn").addEventListener("click", () => { $("student").value = ""; resetSession(); });
+  $("open-record")?.addEventListener("click", () => openStudent(studentId()));
 }
 
 function resetSession() {
@@ -493,27 +514,139 @@ function resetSession() {
   $("quick-result").innerHTML = "";
 }
 
+// -- students ------------------------------------------------------------------------------
+
+let students = [];
+
+function studentId() { return Number($("student").value) || null; }
+function studentName() { return students.find((s) => s.id === studentId())?.name || ""; }
+
+async function loadStudents(select) {
+  students = (await api("/api/students")).students;
+  const current = select ?? studentId();
+  $("student").innerHTML = `<option value="">No student (not saved)</option>` +
+    students.map((s) => `<option value="${s.id}">${esc(s.name)}${s.grade ? ` · class ${esc(s.grade)}` : ""}</option>`).join("");
+  if (current && students.some((s) => s.id === current)) $("student").value = String(current);
+}
+
+async function addStudent() {
+  try {
+    const s = await api("/api/students", { name: $("new-name").value, grade: $("new-grade").value, language: state.language });
+    $("new-name").value = ""; $("new-grade").value = "";
+    await loadStudents(s.id);
+    $("add-student-note").textContent = `Added ${s.name}.`;
+    resetSession();
+  } catch (err) {
+    $("add-student-note").textContent = err.message;
+  }
+}
+
+const LEVELS = ["Beginner", "Letter", "Word", "Paragraph", "Story"];
+const day = (iso) => (iso || "").slice(0, 10);
+
+async function renderRoster() {
+  await loadStudents();
+  $("roster").innerHTML = students.length ? `<h2 class="card-title">Students</h2>
+    <div class="table-wrap"><table>
+      <tr><th>Name</th><th>Class</th><th>Latest level</th><th>Readings</th><th>Last seen</th><th>Letters to practise</th></tr>
+      ${students.map((s) => `<tr class="clickable" data-id="${s.id}">
+        <td><b>${esc(s.name)}</b></td><td>${esc(s.grade || "")}</td><td>${esc(s.latest_level || "not placed yet")}</td>
+        <td>${s.readings}</td><td>${day(s.last_seen)}</td>
+        <td class="deva">${s.practise.map((l) => `<span class="pill">${esc(l)}</span>`).join(" ") || "none yet"}</td></tr>`).join("")}
+    </table></div>`
+    : `<p class="muted">No students yet. Add one under Setup, choose them, and every accepted reading is saved to their record.</p>`;
+  $("roster").querySelectorAll("tr.clickable").forEach((tr) => tr.addEventListener("click", () => openStudent(Number(tr.dataset.id))));
+}
+
+function levelChart(sessions) {
+  if (!sessions.length) return `<p class="muted">No full ASER test yet.</p>`;
+  const w = 560, h = 170, left = 78, right = 16, top = 12, bottom = 28;
+  const x = (i) => left + (sessions.length === 1 ? (w - left - right) / 2 : (i * (w - left - right)) / (sessions.length - 1));
+  const y = (lv) => top + ((4 - lv) * (h - top - bottom)) / 4;
+  const pts = sessions.map((s, i) => `${x(i)},${y(s.level_index)}`).join(" ");
+  return `<svg class="level-chart" viewBox="0 0 ${w} ${h}" role="img" aria-label="ASER level over time">
+    ${LEVELS.map((name, lv) => `<line x1="${left}" x2="${w - right}" y1="${y(lv)}" y2="${y(lv)}" class="grid"/>
+      <text x="${left - 8}" y="${y(lv) + 4}" text-anchor="end" class="axis">${name}</text>`).join("")}
+    <polyline points="${pts}" class="line"/>
+    ${sessions.map((s, i) => `<circle cx="${x(i)}" cy="${y(s.level_index)}" r="4.5" class="dot"><title>${day(s.created_at)}: ${esc(s.level)}</title></circle>
+      <text x="${x(i)}" y="${h - 8}" text-anchor="middle" class="axis">${day(s.created_at).slice(5)}</text>`).join("")}
+  </svg>`;
+}
+
+async function openStudent(sid) {
+  showTab("students");
+  const d = await api(`/api/students/${sid}`);
+  const recentDots = (r) => [...r].map((c) => `<span class="dot-${c === "1" ? "ok" : "bad"}" title="${c === "1" ? "said right" : "said wrong"}"></span>`).join("");
+  const sounds = d.sounds.length ? `<div class="table-wrap"><table>
+      <tr><th>Letter</th><th>Sound</th><th>Tried</th><th>Wrong</th><th></th><th>Recent (oldest to newest)</th><th>In words</th></tr>
+      ${d.sounds.map((r) => `<tr>
+        <td class="deva big">${esc(r.letter)}</td><td>${(r.sound || "").split(",").map((x) => `/${esc(x)}/`).join(" ")}</td><td>${r.tries}</td><td>${r.wrong}</td>
+        <td><div class="rate"><div style="width:${Math.round(r.rate * 100)}%"></div></div>${Math.round(r.rate * 100)}%</td>
+        <td>${recentDots(r.recent)}${r.last_ok ? ` <span class="improving">last time right</span>` : ""}</td>
+        <td class="deva">${esc(r.words.join(", "))}</td></tr>`).join("")}
+    </table></div>`
+    : `<p class="muted">Nothing to practise yet: every letter tracked so far was said right.</p>`;
+  const words = d.words.length ? `<div class="words">${d.words.map((w) => `<span class="chip bad">${esc(w.word)}<small>${w.sounds_wrong} wrong · ${esc(w.letters || "")}</small></span>`).join("")}</div>`
+    : `<p class="muted">None yet.</p>`;
+  const readings = d.attempts.map((a) => `<tr><td>${day(a.created_at)}</td><td>${esc((state.config.tasks[a.task] || {}).title || a.task)}</td>
+      <td>${a.passed ? "pass" : "not yet"}</td><td>${a.mistakes}</td><td>${a.correct}/${a.total}</td><td class="deva">${esc(a.transcript)}</td></tr>`).join("");
+  const tracked = d.sounds_tracked;
+  $("student-detail").innerHTML = `<div class="card">
+      <div class="task-head"><div>
+        <h1 class="task-title">${esc(d.student.name)}</h1>
+        <p class="task-instruction">${d.student.grade ? `Class ${esc(d.student.grade)} · ` : ""}${d.attempts.length} readings · ${tracked.n || 0} sounds tracked, ${tracked.wrong || 0} said wrong</p>
+      </div>
+      <a class="btn btn-secondary" href="/api/students/${sid}/export.csv">Download CSV</a></div>
+      <h3 class="section-title">Letters and sounds to practise</h3>
+      <p class="gop-line">Every accepted reading adds one entry per letter the child tried: right or wrong, from the audio check when it ran, otherwise from the transcript. Most often wrong first.</p>
+      ${sounds}
+      <h3 class="section-title">Words to practise</h3>${words}
+      <h3 class="section-title">ASER level over time</h3>${levelChart(d.sessions)}
+      <h3 class="section-title">Readings</h3>
+      <div class="table-wrap"><table><tr><th>Date</th><th>Task</th><th>Verdict</th><th>Mistakes</th><th>Read correctly</th><th>Heard</th></tr>${readings}</table></div>
+      <div class="actions"><button class="btn btn-primary" id="assess-student" type="button">Assess ${esc(d.student.name)} now</button></div>
+    </div>`;
+  $("assess-student").addEventListener("click", () => { $("student").value = String(sid); resetSession(); showTab("assessment"); });
+  $("student-detail").scrollIntoView({ behavior: "smooth" });
+}
+
 // -- quick check ---------------------------------------------------------------------------
 
 function setupQuick() {
   $("quick-input").innerHTML = `<div class="recorder"></div>
     <div class="actions"><button class="btn btn-primary" id="quick-btn" type="button">Score</button></div>`;
   quickRecorder = new Recorder($("quick-input").querySelector(".recorder"), { typedPlaceholder: "What was said" });
-  $("quick-btn").addEventListener("click", () => score($("quick-level").value, $("quick-text").value, quickRecorder, $("quick-result")));
+  $("quick-btn").addEventListener("click", async () => {
+    $("quick-save").innerHTML = "";
+    const level = $("quick-level").value, text = $("quick-text").value;
+    const result = await score(level, text, quickRecorder, $("quick-result"));
+    if (!result || !studentId()) return;
+    $("quick-save").innerHTML = `<div class="actions"><button class="btn btn-secondary" id="quick-save-btn" type="button">Save to ${esc(studentName())}'s record</button><span class="saved" id="quick-saved"></span></div>`;
+    $("quick-save-btn").addEventListener("click", async () => {
+      $("quick-save-btn").disabled = true;
+      try { $("quick-saved").textContent = await saveReading(level, text, result); }
+      catch (err) { $("quick-saved").textContent = `Not saved: ${err.message}`; }
+    });
+  });
 }
 
 // -- wiring ---------------------------------------------------------------------------------
 
-document.querySelectorAll(".tab").forEach((tab) => tab.addEventListener("click", () => {
-  document.querySelectorAll(".tab").forEach((t) => t.classList.toggle("active", t === tab));
-  $("tab-assessment").hidden = tab.dataset.tab !== "assessment";
-  $("tab-quick").hidden = tab.dataset.tab !== "quick";
-}));
+function showTab(name) {
+  document.querySelectorAll(".tab").forEach((t) => t.classList.toggle("active", t.dataset.tab === name));
+  $("tab-assessment").hidden = name !== "assessment";
+  $("tab-quick").hidden = name !== "quick";
+  $("tab-students").hidden = name !== "students";
+  if (name === "students") renderRoster();
+}
+document.querySelectorAll(".tab").forEach((tab) => tab.addEventListener("click", () => showTab(tab.dataset.tab)));
 
 $("engine").addEventListener("change", onEngineChange);
 $("gop-on").addEventListener("change", () => { $("gop-fields").hidden = !$("gop-on").checked; });
 $("gop").addEventListener("input", () => { $("gop-value").textContent = Number($("gop").value).toFixed(1); });
-$("new-child").addEventListener("click", () => { $("child").value = ""; resetSession(); });
+$("new-child").addEventListener("click", resetSession);
+$("student").addEventListener("change", resetSession);
+$("add-student").addEventListener("click", addStudent);
 $("edit-text").addEventListener("click", () => {
   const editing = $("task-text-editor").hidden;
   if (editing) {
@@ -529,6 +662,7 @@ $("edit-text").addEventListener("click", () => {
 });
 
 (async function init() {
+  await loadStudents();
   await loadConfig("hi");
   setupQuick();
   showTask();

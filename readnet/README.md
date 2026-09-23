@@ -48,6 +48,25 @@ sent in parts. Each verdict can be disputed; disputes go to
 `.stt_eval_runs/readnet_disputes.csv` as candidate field cases. Audio is never
 stored. `py -m readnet.tests.test_web` runs a full session over the API.
 
+## Student records: what each child cannot yet say
+
+Choose a student in Setup (or add one) and every accepted reading is saved to
+their record. The **Students** tab lists every student with their latest ASER
+level and the letters they miss most; a student's page shows:
+
+- **Letters and sounds to practise**: each letter the child has tried, how
+  often, how often wrong, the last five results and the words it came up in,
+  most often wrong first. A letter is marked right or wrong by the audio
+  (the letter check, or the sound's GOP against the threshold) when the audio
+  model ran, otherwise from the transcript. Differences the rulebook forgives
+  are not counted against the child.
+- **Words to practise**, the **ASER level over time**, every reading, and a
+  CSV of every sound.
+
+Records live in `.stt_eval_runs/readnet.db` on this computer (git-ignored):
+names, transcripts and scores, never audio. `py -m readnet.web --db other.db`
+uses a different file.
+
 ## Command line
 
 ```bash

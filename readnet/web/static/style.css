@@ -218,3 +218,23 @@ td.deva { font-size: 1rem; }
 .unit small { display: block; color: var(--muted); font-size: .68rem; line-height: 1.25; }
 .unit.low { border-color: var(--bad-line); background: var(--bad-soft); }
 .unit.low small { color: var(--bad); }
+
+/* students */
+.card-title { font-size: 1.05rem; margin: 0 0 .8rem; }
+tr.clickable { cursor: pointer; }
+tr.clickable:hover td { background: #fafaf7; }
+.pill { display: inline-block; font-size: 1rem; border: 1px solid var(--bad-line); background: var(--bad-soft); border-radius: 6px; padding: 0 .45rem; }
+td.big { font-size: 1.5rem; }
+.rate { display: inline-block; width: 70px; height: 8px; background: var(--border); border-radius: 4px; margin-right: .4rem; vertical-align: middle; overflow: hidden; }
+.rate div { height: 100%; background: var(--bad); }
+.dot-ok, .dot-bad { display: inline-block; width: 11px; height: 11px; border-radius: 50%; margin-right: 3px; vertical-align: middle; }
+.dot-ok { background: var(--ok); }
+.dot-bad { background: var(--bad); }
+.improving { font-size: .78rem; color: var(--ok); }
+.add-student { border: 0; margin: 0 0 1rem; padding: 0; }
+.add-student summary { font-size: .88rem; color: var(--accent); }
+.level-chart { width: 100%; max-width: 560px; height: auto; }
+.level-chart .grid { stroke: var(--border); }
+.level-chart .axis { fill: var(--muted); font-size: 11px; font-family: "Inter", sans-serif; }
+.level-chart .line { fill: none; stroke: var(--accent); stroke-width: 2; }
+.level-chart .dot { fill: var(--accent); }
