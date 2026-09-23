@@ -175,17 +175,21 @@ def letter_decisions(
     vocab: dict[str, int],
     blank: int = 0,
     word_delimiter: str | None = "|",
-    spoken_vowel: str | None = "ा",
+    forms: Callable[[str], Sequence[Sequence[str]]] | None = None,
 ) -> list[ClosedSetDecision]:
     """One closed-set decision per letter of a letter task.
 
     Forced alignment finds roughly where each letter was said; each letter's
     stretch of audio (out to the midpoints with its neighbours) is then scored
-    against the expected letter and its known confusions only. A child says क
-    as "ka", which a model may hear as क or का, so each candidate is also tried
-    with `spoken_vowel` and the better of the two counts.
+    against the expected letter and its known confusions only.
+
+    `forms(letter)` lists the unit sequences a spoken letter may take: for a
+    phoneme model, its sounds (/kʰ ə/, /kʰ aː/ — a child names क as "ka" or
+    "kaa"); for a letter model, the letter and letter + ा. The first form is
+    also what the initial alignment uses.
     """
-    target = targets_for_words(letters, vocab, word_delimiter)
+    forms = forms or (lambda c: [c, c + "ा"])
+    target = targets_for_words([list(forms(l)[0]) for l in letters], vocab, word_delimiter)
     spans = ctc_forced_align(log_probs, target.ids, blank)
     starts = [spans[a].start for a, _ in target.word_ranges]
     ends = [spans[b - 1].end for _, b in target.word_ranges]
@@ -197,10 +201,9 @@ def letter_decisions(
         window = log_probs[lo:hi]
         best_by_letter: dict[str, float] = {}
         for candidate in dict.fromkeys([letter, *confusions(letter)]):
-            forms = [candidate] + ([candidate + spoken_vowel] if spoken_vowel and spoken_vowel in vocab else [])
             scores = []
-            for form in forms:
-                ids = [vocab[ch] for ch in form if ch in vocab]
+            for form in forms(candidate):
+                ids = [vocab[u] for u in form if u in vocab]
                 if len(ids) != len(form):
                     continue
                 try:
@@ -228,23 +231,43 @@ class TargetSequence:
     word_ranges: list[tuple[int, int]]
     #: Characters the model's vocabulary does not contain (skipped, and logged).
     unknown: list[str] = field(default_factory=list)
+    #: The units of each word that were kept, in `ids` order.
+    kept: list[list[str]] = field(default_factory=list)
 
 
-def targets_for_words(words: Sequence[str], vocab: dict[str, int], word_delimiter: str | None = "|") -> TargetSequence:
+def targets_for_words(
+    words: Sequence[Sequence[str]], vocab: dict[str, int], word_delimiter: str | None = "|"
+) -> TargetSequence:
+    """Each word is a sequence of units: a string (its letters) or a list of
+    phonemes from g2p."""
     ids: list[int] = []
     ranges: list[tuple[int, int]] = []
     unknown: list[str] = []
+    kept: list[list[str]] = []
     for w, word in enumerate(words):
         if w and word_delimiter is not None and word_delimiter in vocab:
             ids.append(vocab[word_delimiter])
         start = len(ids)
-        for ch in word:
-            if ch in vocab:
-                ids.append(vocab[ch])
+        kept.append([])
+        for unit in word:
+            if unit in vocab:
+                ids.append(vocab[unit])
+                kept[-1].append(unit)
             else:
-                unknown.append(ch)
+                unknown.append(unit)
         ranges.append((start, len(ids)))
-    return TargetSequence(ids, ranges, unknown)
+    return TargetSequence(ids, ranges, unknown, kept)
+
+
+@dataclass
+class UnitEvidence:
+    """One sound (phoneme) or letter of a word: where it was said and its GOP."""
+
+    unit: str
+    start_s: float
+    end_s: float
+    gop: float  # mean log posterior — the blueprint's GOP(p)
+    llr: float  # versus the strongest rival — what the app shows
 
 
 @dataclass
@@ -254,6 +277,7 @@ class WordEvidence:
     end_s: float | None
     gop: float | None  # weakest token's mean log posterior
     llr: float | None  # weakest token's LLR
+    units: list[UnitEvidence] = field(default_factory=list)
 
 
 @dataclass
@@ -281,13 +305,18 @@ def evidence_for_words(
     frame_seconds: float,
     blank: int = 0,
     word_delimiter: str | None = "|",
+    units: Sequence[Sequence[str]] | None = None,
 ) -> AcousticEvidence:
-    """Align the canonical words to the audio and score each one."""
-    target = targets_for_words(words, vocab, word_delimiter)
+    """Align the canonical words to the audio and score each one.
+
+    `units` gives each word's sequence to align — its phonemes, from g2p, for
+    a phoneme model. Without it the word's letters are used (letter model).
+    """
+    target = targets_for_words(units if units is not None else words, vocab, word_delimiter)
     spans = ctc_forced_align(log_probs, target.ids, blank)
     scores = gop(log_probs, spans, target.ids, blank)
     evidence: list[WordEvidence] = []
-    for word, (a, b) in zip(words, target.word_ranges):
+    for word, (a, b), kept in zip(words, target.word_ranges, target.kept):
         if a == b:
             evidence.append(WordEvidence(word, None, None, None, None))
             continue
@@ -299,6 +328,11 @@ def evidence_for_words(
                 spans[b - 1].end * frame_seconds,
                 min(g.mean_log_posterior for g in scores[a:b]),
                 weakest.llr,
+                [
+                    UnitEvidence(unit, spans[k].start * frame_seconds, spans[k].end * frame_seconds,
+                                 scores[k].mean_log_posterior, scores[k].llr)
+                    for unit, k in zip(kept, range(a, b))
+                ],
             )
         )
     return AcousticEvidence(evidence, target.unknown)
@@ -340,6 +374,10 @@ def greedy_decode(emissions: Emissions) -> str:
 class EmissionModel(Protocol):
     def emissions(self, wav_bytes: bytes) -> Emissions: ...
 
+
+#: Ungated multilingual phoneme recogniser (IPA, eSpeak symbols): scores
+#: sounds, so text goes through g2p first. The default for GOP.
+PHONEME_MODEL = "facebook/wav2vec2-xlsr-53-espeak-cv-ft"
 
 #: Ungated Hugging Face CTC checkpoints that download with no terms to accept.
 DEFAULT_MODELS = {

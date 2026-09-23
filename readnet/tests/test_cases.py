@@ -215,6 +215,34 @@ def test_ctc_forced_alignment_finds_the_boundaries():
     assert [(s.start, s.end) for s in spans] == [(1, 3), (4, 7), (7, 8)]
 
 
+def test_g2p_turns_text_into_sounds():
+    from readnet.g2p import word_to_phonemes
+
+    cases = {
+        "घर": "ɡʰ ə ɾ",          # final schwa dropped: /ɡʰər/, not /ɡʰərə/
+        "कमला": "k ə m l aː",    # medial schwa dropped between VC and CV
+        "गरम": "ɡ ə ɾ ə m",      # ...but not where it would leave a cluster
+        "अंक": "ə ŋ k",          # anusvara before a stop is that stop's nasal
+        "कुत्ता": "k ʊ t t aː",  # virama: no schwa
+        "पढ़ना": "p ə ɽ n aː",    # native nukta sound kept
+        "क": "k ə",              # a letter read alone keeps its vowel
+    }
+    for word, sounds in cases.items():
+        assert " ".join(word_to_phonemes(word)) == sounds, (word, word_to_phonemes(word))
+
+
+def test_forced_alignment_over_phonemes():
+    # Each word is a list of phonemes; alignment and GOP are reported per sound.
+    vocab = {"<pad>": 0, "ɡʰ": 1, "ə": 2, "ɾ": 3}
+    log_probs = _emissions([0, 1, 1, 0, 2, 2, 0, 3, 0], len(vocab))
+    evidence = evidence_for_words(log_probs, ["घर"], vocab, frame_seconds=0.02, word_delimiter=None,
+                                  units=[["ɡʰ", "ə", "ɾ"]])
+    units = evidence.words[0].units
+    assert [u.unit for u in units] == ["ɡʰ", "ə", "ɾ"]
+    assert [(round(u.start_s, 2), round(u.end_s, 2)) for u in units] == [(0.02, 0.06), (0.08, 0.12), (0.14, 0.16)]
+    assert all(u.llr > 0 for u in units)
+
+
 def test_ctc_aligns_long_sequences():
     # 100 tokens = 201 CTC states: past int8, which once overflowed the backtrack.
     targets = [1 + (i % 5) for i in range(100)]
