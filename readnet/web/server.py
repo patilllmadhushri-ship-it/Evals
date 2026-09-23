@@ -23,6 +23,7 @@ import csv
 import importlib.util
 import json
 import mimetypes
+import os
 import time
 from collections import Counter
 from datetime import datetime
@@ -51,6 +52,8 @@ LOCALES = {"hi": "hi-IN", "mr": "mr-IN"}
 #: Engines that reject long audio in one request: split it, at a quiet moment.
 MAX_SECONDS = {"sarvam": 29.0}
 TYPED, LOCAL = "typed", "local"
+#: A shared public demo: records are visible to every visitor and reset on restart.
+PUBLIC = os.environ.get("READNET_PUBLIC", "") not in ("", "0", "false")
 #: Indic-first engines first: Sarvam is built for Hindi and Marathi.
 PREFERRED = ["sarvam", "google", "deepgram", "elevenlabs", "openai", "mock"]
 
@@ -97,8 +100,11 @@ def engines(language: str) -> list[dict]:
                         "note": "Drops words at random from the screen text. For trying the flow without a microphone."})
         elif env.provider_key(key):
             out.append({"key": key, "label": f"{providers.provider_label(key)} (cloud)", "note": ""})
-    out.append({"key": LOCAL, "label": "Local model (wav2vec2, runs on this machine)",
-                "note": local_model_problem()})
+    local = {"key": LOCAL, "label": "Local model (wav2vec2, runs on this machine)", "note": local_model_problem()}
+    if any(e["key"] not in ("mock",) for e in out):
+        out.append(local)
+    else:
+        out.insert(0, local)  # no cloud keys (a public demo): the local model is the engine
     out.append({"key": TYPED, "label": "No speech engine: type what the child said", "note": ""})
     return out
 
@@ -248,8 +254,10 @@ def transcribe(engine: str, audio: bytes | None, filename: str, canonical: str, 
     if engine == LOCAL:
         from ..acoustic import greedy_decode
 
-        # The transcript comes from the letter model; GOP above from the phoneme model.
-        letters_em = load_local_model(DEFAULT_MODELS[language]).emissions(clip.wav_bytes)
+        # The transcript comes from the language's letter model: reuse the GOP
+        # pass when it ran on that same model.
+        letters_model = DEFAULT_MODELS[language]
+        letters_em = em if em is not None and (model_id or letters_model) == letters_model else             load_local_model(letters_model).emissions(clip.wav_bytes)
         return greedy_decode(letters_em), time.perf_counter() - started, evidence, notes, em
 
     if engine not in providers.PROVIDER_CLASSES or not env.provider_key(engine):
@@ -301,6 +309,7 @@ def api_config(query: dict) -> dict:
         "default_local_model": DEFAULT_MODELS[language],
         "phoneme_model": PHONEME_MODEL,
         "gop_available": local_model_available(),
+        "public": PUBLIC,
         "content": {level.name: text for level, text in CONTENT[language].items()},
         "tasks": {level.name: copy for level, copy in TASKS.items()},
     }
