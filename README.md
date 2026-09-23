@@ -112,6 +112,7 @@ stt_eval/
   metrics/                  align.py · wer.py · llm_metrics.py · the registry
 smoke_test.py               Offline end-to-end check (no keys, no network)
 ui_test.py                  Headless render check for all six steps
+readnet/                    ReadNet / PadhAI: a child's reading -> ASER level (see readnet/README.md)
 ```
 
 ## Deploying
@@ -152,7 +153,11 @@ py smoke_test.py
 py ui_test.py
 ```
 
-`smoke_test.py` synthesises audio, runs the mock provider through the real runner, and checks alignment, validation, resumability, aggregation and export. `ui_test.py` renders every step of the Streamlit app headlessly. Neither needs an API key or network access.
+```bash
+py -m readnet.tests.test_cases
+```
+
+`smoke_test.py` synthesises audio, runs the mock provider through the real runner, and checks alignment, validation, resumability, aggregation and export. `ui_test.py` renders every step of the Streamlit app headlessly. None of the three needs an API key or network access; the ReadNet suite also runs in CI on every push that touches `readnet/`.
 
 ---
 

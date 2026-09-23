@@ -1,0 +1,18 @@
+name: readnet-tests
+
+on:
+  push:
+    paths: ["readnet/**", ".github/workflows/readnet-tests.yml"]
+  pull_request:
+    paths: ["readnet/**"]
+
+jobs:
+  regression:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install numpy
+      - run: python -m readnet.tests.test_cases
