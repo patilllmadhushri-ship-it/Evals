@@ -25,7 +25,6 @@ import json
 import mimetypes
 import os
 import time
-from collections import Counter
 from datetime import datetime
 from functools import lru_cache
 from http import HTTPStatus
@@ -37,14 +36,8 @@ from stt_eval import audio as stt_audio
 from stt_eval import env, providers
 from stt_eval.providers import ProviderError
 
-from .. import languages
-from .. import g2p
+from . import core
 from ..acoustic import DEFAULT_MODELS, PHONEME_MODEL
-from ..aser import Level, TaskOutcome, next_task, place
-from ..confusion import hand_made_confusions
-from ..pipeline import assess_task, is_letter_text
-from .content import CONTENT, NEXT_STEPS, TASKS
-from .mistakes import wrong_letters
 
 STATIC = Path(__file__).with_name("static")
 DISPUTE_LOG = Path(".stt_eval_runs") / "readnet_disputes.csv"
@@ -148,71 +141,10 @@ def split_wav(wav_bytes: bytes, max_seconds: float) -> list[bytes]:
     return out
 
 
-def is_phoneme_model(vocab: dict[str, int]) -> bool:
-    return "ə" in vocab
-
-
 def gop_evidence(wav_bytes: bytes, canonical: str, language: str, model_id: str):
-    """Forced alignment + GOP of the audio against the expected text.
-
-    Default: the Hindi (or Marathi) letter model, which was trained on
-    thousands of hours of the language and separates right from wrong
-    reading. Each aligned letter is labelled with the sounds G2P says it
-    stands for (घ -> /ɡʰ ə/), so the result reads sound by sound; the unwritten
-    /ə/ shares its consonant's frames and score, because this model hears
-    them as one unit.
-
-    A phoneme model (IPA output, e.g. PHONEME_MODEL) aligns G2P's sounds
-    directly, /ə/ included — but the multilingual one tested here separated
-    right from wrong Hindi reading poorly, so it is opt-in.
-    """
-    from ..acoustic import evidence_for_words
-
+    """Run the local model on the recording; alignment and GOP happen in core."""
     em = load_local_model(model_id or DEFAULT_MODELS[language]).emissions(wav_bytes)
-    words = languages.get(language).normalize(canonical)[0].split()
-    if is_phoneme_model(em.vocab):
-        evidence = evidence_for_words(em.log_probs, words, em.vocab, frame_seconds=em.frame_seconds,
-                                      blank=em.blank, word_delimiter=None,
-                                      units=[g2p.word_to_phonemes(w) for w in words])
-    else:
-        evidence = evidence_for_words(em.log_probs, words, em.vocab, frame_seconds=em.frame_seconds,
-                                      blank=em.blank, word_delimiter=em.word_delimiter)
-    return evidence, em
-
-
-def unit_rows(word: str, units, phoneme_units: bool) -> list[dict]:
-    """Each aligned unit of `word`, labelled with the sounds it stands for.
-
-    For a letter model, G2P's per-letter sounds: घ -> "ɡʰ ə". Letters come
-    back in word order (minus any the model's vocabulary lacks), so they are
-    matched to their positions in the word by walking it.
-    """
-    sounds = g2p.letter_sounds(word) if not phoneme_units else []
-    rows, pos = [], 0
-    for u in units:
-        label = u.unit
-        if not phoneme_units:
-            while pos < len(word) and word[pos] != u.unit:
-                pos += 1
-            if pos < len(word):
-                label = sounds[pos]
-                pos += 1
-        rows.append({"letter": None if phoneme_units else u.unit, "sounds": label,
-                     "start_s": round(u.start_s, 2), "end_s": round(u.end_s, 2), "gop": round(u.llr, 1),
-                     "heard": u.heard})
-    return rows
-
-
-def letter_forms(em):
-    """How a spoken letter may sound, in the model's units."""
-    if not is_phoneme_model(em.vocab):
-        return None  # letter model: the letter, or letter + ा
-    def forms(letter: str):
-        sounds = g2p.word_to_phonemes(letter)
-        if len(sounds) == 2 and sounds[1] == g2p.SCHWA:  # a consonant: "ka", "kaa", or just /k/
-            return [sounds, [sounds[0], "aː"], [sounds[0]]]
-        return [sounds]
-    return forms
+    return core.evidence_from_emissions(em, canonical, language), em
 
 
 def transcribe(engine: str, audio: bytes | None, filename: str, canonical: str, language: str,
@@ -292,165 +224,56 @@ def _language(value) -> str:
     return code
 
 
-def _outcome_dict(outcome: TaskOutcome) -> dict:
-    return {
-        "level": outcome.level.name, "passed": outcome.passed, "mistakes": outcome.mistakes,
-        "correct": outcome.correct, "total": outcome.total, "wpm": outcome.wpm,
-        "longest_pause": outcome.longest_pause, "reasons": outcome.reasons,
-    }
-
-
 def api_config(query: dict) -> dict:
     language = _language(query.get("language", ["hi"])[0])
     return {
-        "languages": [{"code": c, "name": languages.get(c).name} for c in LOCALES],
-        "language": language,
+        **core.base_config(language),
         "engines": engines(language),
         "default_local_model": DEFAULT_MODELS[language],
         "phoneme_model": PHONEME_MODEL,
         "gop_available": local_model_available(),
         "public": PUBLIC,
-        "content": {level.name: text for level, text in CONTENT[language].items()},
-        "tasks": {level.name: copy for level, copy in TASKS.items()},
     }
 
 
 def api_score(body: dict) -> dict:
     language = _language(body.get("language"))
     try:
-        level = Level[str(body.get("level", "PARAGRAPH")).upper()]
-    except KeyError as error:
-        raise ApiError(f"Unknown level: {body.get('level')}") from error
+        level = core.parse_level(body.get("level"))
+    except core.ScoringError as error:
+        raise ApiError(str(error)) from error
     text = str(body.get("text") or "").strip()
     if not text:
         raise ApiError("The text shown to the child is empty.")
     engine = str(body.get("engine") or TYPED)
-    gop_threshold = body.get("gop_threshold")
     with_gop = bool(body.get("gop", True))
-    notes: list[str] = []
+    model_id = str(body.get("model_id") or "")
 
+    notes: list[str] = []
     em = None
     if engine == TYPED:
-        transcript, seconds, evidence = str(body.get("typed") or ""), 0.0, None
+        transcript, seconds = str(body.get("typed") or ""), 0.0
     else:
         audio = base64.b64decode(body["audio_b64"]) if body.get("audio_b64") else None
         try:
-            transcript, seconds, evidence, notes, em = transcribe(
-                engine, audio, str(body.get("filename") or ""), text, language, str(body.get("model_id") or ""),
-                with_gop,
+            transcript, seconds, _, notes, em = transcribe(
+                engine, audio, str(body.get("filename") or ""), text, language, model_id, with_gop,
             )
         except (ProviderError, stt_audio.AudioError, OSError, ImportError, ValueError) as error:
             raise ApiError(f"Could not transcribe: {error}", HTTPStatus.BAD_GATEWAY) from error
 
-    # Letters: an open engine cannot hear aspiration in a half-second clip
-    # (it wrote का का गा गा for क ख ग घ). When the audio model is loaded, each
-    # letter is decided by a closed-set check instead: the expected letter
-    # against its known confusions only. The engine's text is kept to compare.
-    profile = languages.get(language)
-    letters = profile.normalize(text)[0].split()
-    letter_check = None
-    engine_transcript = transcript
-    if em is not None and is_letter_text(" ".join(letters)):
-        from ..acoustic import letter_decisions
-
-        try:
-            decisions = letter_decisions(em.log_probs, letters, lambda l: hand_made_confusions(l, profile.tables),
-                                         em.vocab, em.blank,
-                                         None if is_phoneme_model(em.vocab) else em.word_delimiter,
-                                         forms=letter_forms(em))
-            letter_check = [{"letter": d.expected, "heard": d.best, "margin": round(d.margin, 1),
-                             "candidates": sorted(d.scores, key=d.scores.get, reverse=True)} for d in decisions]
-            transcript = " ".join(d.best for d in decisions)
-            notes.append("Letters were judged by the acoustic letter check (each letter against the letters it "
-                         "is usually confused with); the engine's own transcript is shown for comparison.")
-        except ValueError as error:
-            notes.append(f"Letter check skipped: {error}")
-
-    outcome, items = assess_task(
-        level, [(text, transcript)], language=language, acoustic=[evidence] if evidence else None,
-        gop_threshold=float(gop_threshold) if evidence and gop_threshold is not None else None,
+    gop_threshold = body.get("gop_threshold")
+    return core.score_reading(
+        language=language, level=level, text=text, transcript=transcript, engine=engine, seconds=seconds,
+        em=em, notes=notes, with_gop=with_gop,
+        gop_threshold=float(gop_threshold) if gop_threshold is not None else 0.0,
         audio_decides=bool(body.get("audio_decides", True)),
+        model_label=model_id or DEFAULT_MODELS[language], typed=engine == TYPED,
     )
-    item = items[0]
-    phoneme_units = em is not None and is_phoneme_model(em.vocab)
-    ops = []
-    for op in item.result.ops:
-        entry = {k: v for k, v in op.__dict__.items()}
-        entry["subtypes"] = list(op.subtypes)
-        if evidence and op.ref_index is not None and op.ref_index < len(evidence.words):
-            w = evidence.words[op.ref_index]
-            entry.update(start_s=w.start_s, end_s=w.end_s, gop=w.llr,
-                         units=unit_rows(op.ref, w.units, phoneme_units))
-        ops.append(entry)
-
-    if evidence is not None and phoneme_units:
-        notes.append("Phoneme model: this multilingual model separated right from wrong Hindi reading poorly "
-                     "in testing. The default Hindi model is the more reliable judge.")
-    kinds = Counter(op["kind"] for op in ops)
-    gop_scored = [op for op in ops if op.get("gop") is not None]
-    if evidence is not None:
-        gop_detail = (f"Ran on {len(gop_scored)} words ({sum(len(op.get('units') or []) for op in gop_scored)} "
-                      f"sounds) with {body.get('model_id') or DEFAULT_MODELS[language]}. "
-                      f"{sum(1 for op in gop_scored if op['gop'] < float(gop_threshold or 0))} below the threshold.")
-    elif engine == TYPED:
-        gop_detail = "Not run: typed transcripts have no audio."
-    elif not with_gop:
-        gop_detail = "Off (turned off in Setup)."
-    else:
-        gop_detail = next((n for n in notes if n.startswith("GOP")), "Not run.")
-    pipeline = [
-        {"stage": "Speech to text", "detail": f"{engine}: {engine_transcript or '(nothing heard)'}"},
-        {"stage": "Normalise the text on screen", "rules": item.canonical_trace.steps,
-         "result": item.canonical_normalized},
-        {"stage": "Normalise the text heard", "rules": item.transcript_trace.steps,
-         "result": item.transcript_normalized},
-        {"stage": "Align word by word", "detail": f"{kinds['match']} matched, {kinds['substitution']} substituted, "
-                                                 f"{kinds['deletion']} not read, {kinds['insertion']} extra"},
-        {"stage": "Forgiveness rules", "detail": ", ".join(f"{r} ×{n}" for r, n in item.result.rules_applied.items())
-                                                  or "None applied."},
-        {"stage": "Pronunciation (GOP)", "detail": gop_detail},
-    ]
-    if letter_check is not None:
-        pipeline.append({"stage": "Letter check", "detail": ", ".join(
-            f"{c['letter']}→{c['heard']}" for c in letter_check)})
-    pipeline.append({"stage": "Verdict", "detail": "; ".join(outcome.reasons)})
-
-    response = {
-        "outcome": _outcome_dict(outcome),
-        "transcript": transcript,
-        "engine_transcript": engine_transcript,
-        "letter_check": letter_check,
-        "seconds": round(seconds, 2),
-        "canonical_normalized": item.canonical_normalized,
-        "transcript_normalized": item.transcript_normalized,
-        "changes": [{"rule": r, "before": b, "after": a} for r, b, a in item.transcript_trace.steps],
-        "acoustic_doubts": item.acoustic_doubts,
-        "gop_ran": evidence is not None,
-        "notes": notes,
-        "pipeline": pipeline,
-        "mistake_profile": dict(item.result.mistake_profile),
-        "ops": ops,
-    }
-    threshold = float(gop_threshold) if gop_threshold is not None else 0.0
-    response["wrong_letters"] = wrong_letters(response, language, threshold)
-    return response
 
 
 def api_next(body: dict) -> dict:
-    outcomes: dict[Level, TaskOutcome] = {}
-    for name, o in (body.get("outcomes") or {}).items():
-        level = Level[name]
-        outcomes[level] = TaskOutcome(level, bool(o["passed"]), int(o.get("mistakes", 0)),
-                                      int(o.get("correct", 0)), int(o.get("total", 0)),
-                                      reasons=list(o.get("reasons", [])))
-    upcoming = next_task(outcomes)
-    if upcoming is not None:
-        return {"next": upcoming.name, "placement": None}
-    placement = place(outcomes)
-    return {"next": None, "placement": {
-        "level": placement.level.name, "label": placement.level.label,
-        "path": placement.path, "next_step": NEXT_STEPS[placement.level],
-    }}
+    return core.next_step(body.get("outcomes") or {})
 
 
 def api_dispute(body: dict) -> dict:
