@@ -42,11 +42,20 @@ class TokenSpan:
 
 def ctc_forced_align(log_probs: np.ndarray, targets: Sequence[int], blank: int = 0) -> list[TokenSpan]:
     """Viterbi alignment of `targets` to a (T, V) log-probability matrix."""
+    return _viterbi(log_probs, targets, blank)[0]
+
+
+def ctc_path_score(log_probs: np.ndarray, targets: Sequence[int], blank: int = 0) -> float:
+    """Log-probability of the best path that emits exactly `targets`."""
+    return _viterbi(log_probs, targets, blank)[1]
+
+
+def _viterbi(log_probs: np.ndarray, targets: Sequence[int], blank: int) -> tuple[list[TokenSpan], float]:
     log_probs = np.asarray(log_probs, dtype=np.float64)
     T = log_probs.shape[0]
     L = len(targets)
     if L == 0:
-        return []
+        return [], float(np.asarray(log_probs)[:, blank].sum())
     states = [blank]
     for t in targets:
         states += [t, blank]
@@ -75,6 +84,7 @@ def ctc_forced_align(log_probs: np.ndarray, targets: Sequence[int], blank: int =
         back[t] = choice
 
     s = S - 1 if score[T - 1, S - 1] >= score[T - 1, S - 2] else S - 2
+    best = float(score[T - 1, s])
     path = np.empty(T, dtype=np.int64)
     for t in range(T - 1, -1, -1):
         path[t] = s
@@ -84,7 +94,7 @@ def ctc_forced_align(log_probs: np.ndarray, targets: Sequence[int], blank: int =
     for token_index in range(L):
         frames = np.nonzero(path == 2 * token_index + 1)[0]
         spans.append(TokenSpan(token_index, int(frames[0]), int(frames[-1]) + 1))
-    return spans
+    return spans, best
 
 
 @dataclass(frozen=True)
@@ -105,6 +115,57 @@ def gop(log_probs: np.ndarray, spans: Sequence[TokenSpan], targets: Sequence[int
         rivals[:, [target, blank]] = -np.inf
         out.append(TokenGop(span.token_index, float(own.mean()), float((own - rivals.max(axis=1)).mean())))
     return out
+
+
+# -- closed-set decisions (letters) -----------------------------------------------------
+
+
+@dataclass(frozen=True)
+class ClosedSetDecision:
+    expected: str
+    best: str
+    #: Best-path log-probability per candidate; higher is a better fit.
+    scores: dict[str, float]
+    #: expected's score minus the best rival's; negative means a rival fits better.
+    margin: float
+
+    @property
+    def accepted(self) -> bool:
+        return self.best == self.expected
+
+
+def closed_set_decision(
+    log_probs: np.ndarray,
+    expected: str,
+    candidates: Sequence[str],
+    vocab: dict[str, int],
+    blank: int = 0,
+) -> ClosedSetDecision:
+    """Does this audio match `expected`, or one of its known confusions?
+
+    For a 400 ms clip of one letter, open transcription over every sound in
+    the language is the wrong question. Force-align the audio to the expected
+    letter and to each likely confusion (``confusion.hand_made_confusions`` or
+    a learned ``ConfusionMatrix.confusions_of``), and pick the best fit. This
+    is a closed decision over a handful of candidates, the standard approach in
+    the reading-assessment literature. It needs only frame log-probabilities,
+    so it works with any CTC model that exposes them.
+    """
+    scores: dict[str, float] = {}
+    for candidate in dict.fromkeys([expected, *candidates]):
+        ids = [vocab[ch] for ch in candidate if ch in vocab]
+        if len(ids) != len(candidate):
+            continue  # the model cannot emit this candidate
+        try:
+            scores[candidate] = ctc_path_score(log_probs, ids, blank)
+        except ValueError:
+            continue  # too long for the clip
+    if expected not in scores:
+        raise ValueError(f"The model's vocabulary cannot represent {expected!r}")
+    best = max(scores, key=scores.get)
+    rivals = [v for k, v in scores.items() if k != expected]
+    margin = scores[expected] - max(rivals) if rivals else float("inf")
+    return ClosedSetDecision(expected, best, scores, margin)
 
 
 # -- text <-> model tokens --------------------------------------------------------

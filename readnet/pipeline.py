@@ -17,7 +17,7 @@ from typing import Sequence
 from . import languages
 from .acoustic import AcousticEvidence
 from .aser import Level, Rules, TaskOutcome, judge_task
-from .languages.devanagari import Trace
+from .languages import Trace
 from .score import ScoreResult, score
 
 
@@ -41,7 +41,8 @@ class ItemAssessment:
             "canonical_normalized": self.canonical_normalized,
             "transcript_normalized": self.transcript_normalized,
             "transcript_changes": self.transcript_trace.steps,
-            "transliterated": self.transcript_trace.transliterated,
+            "canonical_changes": self.canonical_trace.steps,
+            "romanised_words": self.transcript_trace.romanised_words,
             "acoustic_doubts": self.acoustic_doubts,
             **self.result.as_dict(),
         }

@@ -1,118 +1,170 @@
-# Hindi reading rules
+# Hindi rulebook
 
-This page explains, without code, how the app decides whether a child read a
-Hindi word correctly. It is for teachers, assessors and linguists. The
-executable version of every rule is `normalize_hi.py` in this folder. If you
-change one, change the other in the same edit.
+Every decision the app makes about Hindi reading, in plain language. This
+document is the deliverable. `normalize_hi.py` is its executable copy: one
+function per rule, named after the rule's id. Change the two in the same
+commit, and add a row to `tests/field_cases.csv` that cites the rule.
 
-## Why the app "cleans" text before comparing
+**Status: reconstruction, unsigned.** Hindi is already in production, and its
+rulebook lives partly in code and partly in the head of the person who wrote
+it. These rules were rebuilt from the problem statement and general Hindi
+practice. They must be reconciled with the production rules and signed off
+before they replace anything. A rule with no sign-off is a proposal.
 
-The speech recogniser (ASR) writes down what it heard. There are often several
-correct ways to write the same spoken word, and the recogniser may pick a
-different one from the book. If the app compared letters directly, the child
-would be marked wrong for the recogniser's spelling choice. So before comparing,
-the app rewrites both the book text and the heard text into one standard
-spelling. It does this in five steps, always in this order.
+Rules shared by every language (S-00 to S-04) are in
+[`../../RULES_SHARED.md`](../../RULES_SHARED.md).
 
-### Step 1: One code for each letter
+## How to read a rule
 
-A computer can store the same visible letter in more than one way. The app
-converts every letter to a single standard form first. You will never see this
-step, but without it, identical-looking words can fail to match.
+- **Case**: what the strings look like.
+- **Decision**: what the app does.
+- **Why**: the reasoning, so the decision can be argued with.
+- **Neutral?**: "yes" means the difference is not in the speech at all, so the
+  model benchmark uses this rule too. "no" means it is a teaching choice and
+  applies only when scoring children.
+- **Sign-off**: who agreed to it, and when.
 
-### Step 2: Latin script back to Hindi
+## Text rules (applied to each string alone, in this order)
 
-Some recognisers answer in English letters, like `ghar` for घर. The app
-converts these back to Devanagari. Latin spelling cannot show every Hindi
-sound: `sita` could be सिता or सीता, and `t` could be त or ट. So when a
-converted word differs from the book only in vowel length (ि/ी, ु/ू),
-dental versus retroflex (त/ट), or nasalisation, the child is **not** marked
-wrong.
+### HI-01: One code for each letter
+- **Case:** the same visible word stored as different bytes (NFC vs NFD; क़ as
+  one code point or as क + ़).
+- **Decision:** convert both strings to Unicode NFC first.
+- **Why:** identical-looking words must compare equal (Reason 4).
+- **Neutral?** yes · **Sign-off:** —
 
-Devanagari digits (५) and English digits (5) are treated as the same.
+### HI-02: Latin script back to Devanagari
+- **Case:** the engine answers `ghar` for घर.
+- **Decision:** transliterate Latin words to Devanagari.
+- **Why:** a script difference is the engine's choice, not the child's (Reason 5).
+- **Neutral?** yes · **Sign-off:** —
 
-### Step 3: Invisible marks and punctuation
+### HI-03: One set of digits
+- **Case:** ५ vs 5.
+- **Decision:** treat as the same digit.
+- **Why:** the same number.
+- **Neutral?** yes · **Sign-off:** —
 
-Some characters change only how a word looks on screen and carry no sound.
-Examples are the "zero-width joiner" and "non-joiner". These are removed. So is
-punctuation (। , ! ?), because a child does not read it aloud.
+### HI-04: Invisible marks and punctuation
+- **Case:** zero-width joiner/non-joiner; । , ! ?
+- **Decision:** remove them.
+- **Why:** they change only how text looks. A child does not read punctuation
+  aloud (Reason 4).
+- **Neutral?** yes · **Sign-off:** —
 
-### Step 4: Marks that do not change the sound
+### HI-05: The Urdu nukta is silent
+- **Case:** ज़रा vs जरा; also क़ ख़ ग़ फ़.
+- **Decision:** remove the dot, **except under ड़ and ढ़**, where it is kept.
+- **Why:** most Hindi speakers do not make the Urdu sounds. ड़ and ढ़ are native
+  Hindi sounds, so पढ़ ≠ पड़.
+- **Neutral?** yes · **Sign-off:** —
 
-| Written difference | Treated as | Example |
-|---|---|---|
-| Chandrabindu ँ vs anusvara ं | Same | हूँ = हूं, चाँद = चांद |
-| Dot under क़ ख़ ग़ ज़ फ़ (Urdu sounds) | Dot removed | ज़रा = जरा |
-| Dot under ड़ ढ़ | **Kept**, a real Hindi sound | पढ़ ≠ पड़ |
-| Half nasal before a letter of its own group | Same as anusvara | सन्त = संत, अङ्क = अंक |
-| Half म or न before ह | **Kept**, a real cluster | तुम्हारा ≠ तुमहारा |
+### HI-06: Chandrabindu is written as anusvara
+- **Case:** हूँ vs हूं; चाँद vs चांद.
+- **Decision:** treat as the same nasal marker, except for words on HI-07.
+- **Why:** engines and writers use the two interchangeably ("consistent nasal
+  markers", Reason 4).
+- **Neutral?** yes · **Sign-off:** —
 
-### Step 5: Word lists
+### HI-07: Words that keep their chandrabindu (exception to HI-06)
+- **Case:** हँस (laugh) vs हंस (swan); हँसी, हँसना.
+- **Decision:** these words are not changed by HI-06.
+- **Why:** the mark is the only thing telling two different words apart.
+- **Risk:** if engines routinely write हंसना for हँसना, this rule causes false
+  fails. Check it against field data before signing.
+- **Neutral?** yes · **Sign-off:** —
 
-**Protected words** keep all their marks, because the mark is what tells two
-words apart:
+### HI-08: Half nasal before a letter of its own group
+- **Case:** सन्त vs संत; अङ्क vs अंक.
+- **Decision:** write the half nasal as an anusvara. **Not** before ह or
+  another nasal: तुम्हारा ≠ तुमहारा.
+- **Why:** two spelling conventions for one sound.
+- **Neutral?** yes · **Sign-off:** —
 
-- हँस (laugh) and हंस (swan)
-- हँसी and हंसी
+### HI-09: One code per letter shape
+- **Case:** ॲ vs ऍ; ऱ vs र.
+- **Decision:** treat as the same letter.
+- **Why:** two code points for one letter and one sound.
+- **Neutral?** yes · **Sign-off:** —
 
-**Interchangeable spellings** are treated as one word, because they are spoken
-the same way:
+### HI-10: Interchangeable spellings
+- **Case:** गयी/गई, गये/गए, नयी/नई, आये/आए, लिये/लिए, दिये/दिए, किये/किए,
+  हुये/हुए, चाहिये/चाहिए, जायेगा/जाएगा, जायेगी/जाएगी.
+- **Decision:** fold each pair to one spelling.
+- **Why:** spoken identically. Both spellings are standard.
+- **Neutral?** yes · **Sign-off:** —
 
-| Written | Treated as |
-|---|---|
-| गयी, गये, नयी, आये | गई, गए, नई, आए |
-| लिये, दिये, किये, हुये | लिए, दिए, किए, हुए |
-| चाहिये, जायेगा, जायेगी | चाहिए, जाएगा, जाएगी |
+## Scoring rules (need the expected word, so they run after alignment)
 
-To add a word to either list, change `normalize_hi.py` and add a row to
-`tests/field_cases.csv` that proves it.
+The problem statement's key point applies here. Whether a difference is
+forgivable can depend on *which word was expected*, so these rules cannot be
+applied to each string alone.
 
-## Counting mistakes
+### HI-20: A dropped nasal is not assessed
+- **Case:** गाँव read as गाव. The word was read; only the nasalisation is missing.
+- **Decision:** not a mistake, unless the word is on HI-21.
+- **Why:** we test decoding, not elocution, and the meaning survives (Reason 2).
+  Only a *dropped* nasal is forgiven. An added one (गाव → गांव) still counts.
+- **Neutral?** no. Forgiving only · **Sign-off:** —
 
-After the cleaning, the app lines up the book text against the heard text word
-by word.
+### HI-21: Words where a dropped nasal destroys the word (exception to HI-20)
+- **Case:** चाँद read as चाद. It is the same surface difference as गाँव → गाव.
+- **Decision:** count it as a mistake. The current list is चाँद and हँस.
+- **Why:** the word is gone (Reason 3). This list is the hand-maintained
+  exception list that the literature describes as the state of the art. Grow
+  it from field disagreements.
+- **Neutral?** no · **Sign-off:** —
 
-**Counted as a mistake:**
-- A word read as a different word. The app records what kind of difference it
-  was (see below).
-- A word skipped or not read. If the child stops halfway, every unread word
-  counts.
+### HI-22: श and ष are one sound
+- **Case:** विशेष read or written as विशेश.
+- **Decision:** not a mistake.
+- **Why:** Hindi speakers do not distinguish them, and engines spell either.
+  स for श is **not** forgiven (open question 3).
+- **Neutral?** no · **Sign-off:** —
 
-**Not counted as a mistake:**
-- Repeating a word (घर घर).
-- Starting a word and restarting it, or correcting yourself (गर… घर).
-- Hesitation sounds (उम्म, हम्म, अं).
-- **श read as ष, or ष as श.** Hindi speakers do not distinguish these sounds,
-  and recognisers spell them either way.
-- An extra word that is not in the text. It is usually the recogniser
-  mishearing, not the child. It is shown in the report but not counted.
+### HI-23: A spoken letter carries its vowel
+- **Case:** a letter task shows क. The child says "ka", and the engine writes
+  क, का or कअ.
+- **Decision:** all three count as reading क.
+- **Why:** that is how letters are named aloud.
+- **Neutral?** no · **Sign-off:** —
 
-**Kinds of mistake**, recorded for the child's mistake profile:
+### HI-24: Romanised output is judged only on what Latin can show
+- **Case:** the engine writes `sita` for सीता. After transliteration it reads
+  सिता.
+- **Decision:** for words that arrived in Latin script, forgive vowel length,
+  dental/retroflex and nasalisation differences. Nothing else is forgiven:
+  `gar` for घर still counts.
+- **Why:** Latin spelling does not carry those distinctions, so the difference
+  is the transliterator's guess, not the child's reading.
+- **Neutral?** no · **Sign-off:** —
 
-| Kind | Meaning | Example |
+## Types of mistake (for the mistake profile)
+
+| Type | Meaning | Example |
 |---|---|---|
 | aspiration | breathy/plain letter swapped | घर → गर |
 | voicing | voiced/unvoiced swapped | दाल → ताल |
 | retroflex_dental | ट-group vs त-group | रानी → राणी |
 | vowel_length | short/long vowel swapped | दिन → दीन |
-| nasalisation | nasal mark added or dropped | हँस → हंस |
+| nasalisation | nasal mark added, or dropped where HI-21 applies | चाँद → चाद |
 | visual | letters that look alike | धन → घन |
-| matra / conjunct | vowel sign or half-letter dropped or wrong | तुम्हारा → तुमहारा |
+| matra / conjunct | vowel sign or half letter dropped or wrong | तुम्हारा → तुमहारा |
 | partial | word left unfinished | बाज़ार → बा |
 | different_word | a different word altogether | |
 
-## Single letters
+The phonetic/visual split uses two hand-made lists
+(`languages/devanagari.py`). `py -m readnet confusions` estimates the real
+confusions from field pairs and shows where the lists and the data disagree.
 
-When a child reads a letter aloud, they say क as "ka". Recognisers write that
-as क, का or कअ, and the app accepts all three as क.
+## Open questions
 
-## Questions for the assessment team
-
-These rules are the app's current best reading of ASER practice. They need
-confirming by Pratham's assessment team:
-
-1. Should skipping a whole line count as one mistake or one per word? Today it
-   counts one per word.
-2. Should extra words ever count? Today they never do.
-3. Should dialect pronunciations count as correct, such as स for श, or ज for ज़
-   (which is already allowed)? Today only श/ष is forgiven.
+1. **Word-final schwa.** Were annotators consistent about word-final schwa?
+   If not, paragraph-level error counts are silently inflated. This is an
+   archaeology task: ask the people who briefed the annotators.
+2. **Annotation conventions.** Were annotators told to write anything a
+   particular way that is not written down anywhere? That was the Colombia "B"
+   problem. Any such convention becomes a rule here.
+3. **Dialect sounds.** Should स for श count as correct? Today it does not.
+4. **Skipped lines.** Should a skipped line count as one mistake or one per
+   word? Today it is one per word.

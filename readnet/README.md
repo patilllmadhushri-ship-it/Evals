@@ -2,15 +2,16 @@
 
 ReadNet takes the text on the screen and what a child read aloud, and returns
 the child's ASER level: **Beginner → Letter → Word → Paragraph → Story**. It
-also gives a profile of the kinds of mistakes the child made. This package
-implements the ReadNet / PadhAI pipeline blueprint for Hindi and Marathi.
+also gives the child's mistake profile. It implements the ReadNet / PadhAI
+blueprint and the "Turning speech into a reading score" approach, for Hindi
+and Marathi, with a template for the next languages.
 
 ```bash
 py -m readnet.tests.test_cases
 ```
 
 ```bash
-py -m readnet assess --lang hi --level paragraph --text "मेरा घर बड़ा है।" --transcript "मेरा गर घर बड़ा है"
+py -m readnet assess --lang hi --text "चाँद और गाँव" --transcript "चाद और गाव"
 ```
 
 ```bash
@@ -18,53 +19,93 @@ py -m readnet assess --lang hi --level word --text "घर" --audio child.wav --
 ```
 
 ```bash
+py -m readnet benchmark --lang hi asr.csv
+```
+
+```bash
+py -m readnet confusions --lang hi pairs.csv
+```
+
+```bash
 py -m readnet evaluate levels.csv
 ```
 
-`--audio` sends the recording through any provider in `stt_eval`, using keys
-from `.env`. `evaluate` reads a CSV with `human_level` and `system_level`
-columns.
+- `assess` scores one reading and names the rule behind every forgiven
+  difference. `--audio` goes through any `stt_eval` provider, with keys from
+  `.env`.
+- `benchmark` measures the model with the **neutral** normaliser, split by
+  level. The CSV has columns `level,reference,hypothesis`.
+- `confusions` estimates letter confusions from `expected,heard` pairs and
+  shows where the hand-made tables disagree.
+- `evaluate` compares against human levels. It reports kappa and the false
+  fail rate from a CSV with columns `human_level,system_level`.
 
-## How it maps to the blueprint
+## Layout: one folder per language, four artifacts
 
-| Blueprint stage | Where | Status |
-|---|---|---|
-| Canonical text + audio in | `pipeline.assess_item` / `assess_task` | Built. Takes any ASR's transcript. |
-| ASR | `stt_eval.providers` (Sarvam, Google, Deepgram, …) via the CLI | Built. These are cloud engines; an on-device child-speech model plugs in the same way. |
-| Normalisation steps 1–5 | `languages/devanagari.py`, configured by `languages/hi/normalize_hi.py` and `languages/mr/normalize_mr.py` | Built |
-| Forced alignment + GOP | `acoustic.py`: CTC Viterbi and both GOP forms, in numpy | Algorithm built and tested. A real model still has to be connected (see below). |
-| Weighted Levenshtein + classification | `score.py` | Built |
-| ASER aggregation + adaptive order | `aser.py` | Built |
-| RULES.md per language | `languages/hi/RULES.md`, `languages/mr/RULES.md` | Built |
-| Regression suite | `tests/field_cases.csv` + `tests/test_cases.py`, run in CI | Built with 42 constructed cases. Needs real field cases. |
-| Kappa, precision/recall, false fail rate | `metrics.py` | Built |
+```
+readnet/
+  RULES_SHARED.md             S-00..S-04 and the ASER decision — every language
+  score.py                    alignment, counting, typing — language-independent
+  languages/
+    __init__.py               the contract: Rule, Forgiveness, ScriptTables, the two normalisers
+    devanagari.py             script helpers + hand-made confusion tables
+    hi/RULES.md               the Hindi rulebook (the deliverable)
+    hi/normalize_hi.py        one function per rule, named hi_NN_...
+    mr/RULES.md, normalize_mr.py
+    _template/                start here for Spanish, Telugu, Odia, Bangla, Assamese
+  tests/field_cases.csv       cases + human verdict + the rule each one tests
+  tests/test_cases.py         runs them; fails if a rule has no case or a case cites no rule
+  aser.py                     levels, pass rules, adaptive order
+  acoustic.py                 CTC forced alignment, GOP, closed-set letter decisions
+  benchmark.py                neutral ASR benchmark, split by level
+  confusion.py                confusion matrix estimated from data
+  metrics.py                  accuracy, weighted kappa, false fail rate, mistake precision/recall
+  pipeline.py                 normalise → align → classify → judge
+```
+
+## The pipeline
+
+```
+raw transcript
+→ text rules, in order (NFC, script, invisible marks, safe-to-ignore marks,
+  word exceptions, spelling conventions)            languages/<xx>/normalize_xx.py
+→ ALIGN against the canonical text (weighted)       score.py
+→ classify: substitution / deletion / insertion
+→ type substitutions: phonetic / visual / partial / different word
+→ context rules that need the expected word         Forgiveness in normalize_xx.py
+  (गाँव→गाव forgiven, चाँद→चाद counted)
+→ shared leniencies (repeats, restarts, fillers)    RULES_SHARED.md
+→ aggregate → mistakes, mistake words, profile, fluency, ASER level
+```
+
+**Two normalisers.** The *neutral* one uses only the text rules marked
+Neutral, which remove differences that are not in the speech. It is used to
+benchmark the model. The *forgiving* path adds the teaching rules, and is used
+to score children. For Hindi and Marathi today, every text rule is neutral;
+all the forgiveness lives in the scoring rules. That is why `benchmark`
+reports both the neutral WER and the forgiving figure you must not publish.
 
 ## Decisions that protect the false fail rate
 
-- **Extra words are reported, not counted.** An inserted word is far more often
-  the ASR hallucinating than the child adding one (`Rules.count_insertions`).
-- **Repeats, restarts, self-corrections and fillers are never mistakes.** This
-  matches ASER practice.
-- **Romanised ASR output is judged only on what Latin script can show.**
-- **Low GOP is flagged, not failed.** A word whose audio disagrees with an
-  "all correct" transcript is listed in `acoustic_doubts`. It becomes a mistake
-  only with `count_acoustic_doubts=True`, which should wait until the GOP
-  threshold is calibrated on labelled child audio.
-- **Fluency (words per minute, pauses) is measured, not enforced.** ASER has no
-  official number for it. Set `Rules.min_wpm` / `max_pause_seconds` once a
-  programme picks one.
+- Extra words are reported, not counted (S-04).
+- Low GOP is flagged, not failed. `acoustic_doubts` lists words where the
+  audio disagrees with a "correct" transcript. They count only with
+  `count_acoustic_doubts=True`, which should wait until the threshold is
+  calibrated on labelled child audio.
+- Fluency is measured, and enforced only when a programme sets a number.
 
-## What still needs outside input
+## What needs people, not code
 
-1. **An acoustic model for GOP.** `acoustic.Wav2Vec2Emissions` wraps any
-   Hugging Face CTC checkpoint, for example `ai4bharat/indicwav2vec-hindi`, and
-   needs `torch` + `transformers`. It has not been run here. An adult-speech
-   model will score children's voices low, so a child-speech fine-tune is the
-   real requirement.
-2. **Real field cases.** The 200-case suite the blueprint asks for should come
-   from real disagreements between the app and assessors. Add them as rows to
-   `field_cases.csv`.
-3. **Human-labelled levels,** to run `evaluate` and report kappa and the false
-   fail rate for real.
-4. **The open questions** at the end of `languages/hi/RULES.md`, for Pratham's
-   assessment team.
+1. **Reconcile with production Hindi.** The Hindi rulebook here is a
+   reconstruction. Compare it rule by rule with the rules in production, and
+   get sign-off.
+2. **Field cases.** 100–200 real disagreements per language in
+   `field_cases.csv`. The current 62 cases are constructed.
+3. **Archaeology per language** before its rules (see `_template/RULES.md`),
+   including the Hindi word-final schwa question.
+4. **A model for the acoustic path.** `acoustic.Wav2Vec2Emissions` wraps a
+   Hugging Face CTC checkpoint and has not been run here. The larger question
+   for the ASR partner: can the offline model expose frame log-probabilities, a
+   lattice, or a biasing hook? If so, `closed_set_decision` turns letter
+   assessment from open transcription into "घ, or one of its known
+   confusions?".

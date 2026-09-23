@@ -1,31 +1,37 @@
-"""Language-agnostic alignment and mistake counting.
+"""Alignment, counting and typing — language-independent, written once.
 
-Input is two already-normalised token lists: what was on the screen and what
-the ASR heard. Output is one operation per word — match, substitution,
-deletion, insertion — each classified and marked as counting, or not, as an
-ASER mistake.
+Input is two token lists already through a language's forgiving normaliser:
+what was on the screen and what the ASR heard. Output is one operation per
+word — match, substitution, deletion, insertion — each typed, marked as
+counting or not as an ASER mistake, and, when forgiven, citing the rule that
+forgave it. Everything script-specific arrives through the `LanguageProfile`.
 
 Two things make this more than plain WER:
 
 * **Weighted alignment.** A substitution between similar words (घर/गर) is
   cheaper than one between unrelated words, so the aligner pairs the words a
-  human would pair, and the substitution can then be classified.
-* **ASER's leniency.** A child who repeats a word, starts a word and restarts
-  it, or corrects themselves is not making a mistake under ASER, and neither is
-  "umm". Those insertions are labelled and never counted. Additions of other
-  words are reported but, by default, not counted either: ASER counts words read
-  wrongly or skipped, and an extra word is far more often an ASR hallucination
-  than a child's error — the false-fail rate is the metric that matters most.
+  human would pair, and the substitution can then be typed.
+* **Forgiveness.** The language's context-dependent rules (a dropped nasal is
+  forgiven in गाँव but not in चाँद) and the shared ASER leniencies below.
+
+Shared rules, the same for every language (see RULES.md):
+
+    S-00  any difference no rule forgives is a mistake; skipped words count
+    S-01  repeating a word is not a mistake
+    S-02  a false start or self-correction is not a mistake
+    S-03  a hesitation sound is not a mistake
+    S-04  an extra word is reported, not counted (usually ASR hallucination)
 """
 
 from __future__ import annotations
 
 from collections import Counter
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Callable, Sequence
 
-from .languages import LanguageProfile
-from .languages import devanagari as dv
+from .languages import LanguageProfile, ScriptTables
+
+SHARED_RULES = {"S-00", "S-01", "S-02", "S-03", "S-04"}
 
 # -- generic weighted Levenshtein ----------------------------------------------
 
@@ -69,11 +75,12 @@ def align(
     return ops
 
 
+def edit_count(ref: Sequence[str], hyp: Sequence[str]) -> int:
+    return sum(1 for kind, _, _ in align(ref, hyp) if kind != "match")
+
+
 def char_distance_ratio(a: str, b: str) -> float:
-    if a == b:
-        return 0.0
-    edits = sum(1 for kind, _, _ in align(a, b) if kind != "match")
-    return edits / max(len(a), len(b), 1)
+    return 0.0 if a == b else edit_count(a, b) / max(len(a), len(b), 1)
 
 
 def word_sub_cost(a: str, b: str) -> float:
@@ -81,43 +88,32 @@ def word_sub_cost(a: str, b: str) -> float:
     return 0.0 if a == b else 0.5 + char_distance_ratio(a, b)
 
 
-# -- classifying one wrong word -------------------------------------------------
+# -- typing one wrong word -------------------------------------------------------
 
 
-def _char_label(r: str, h: str) -> str:
-    pair = frozenset((r, h))
+def char_label(r: str, h: str, tables: ScriptTables) -> str:
     if not r or not h:
         present = r or h
-        if present in (dv.ANUSVARA, dv.CHANDRABINDU):
+        if present in tables.nasal_marks:
             return "nasalisation"
-        if present == "ा":
+        if present in tables.length_marks:
             return "vowel_length"
-        if present in dv.MATRAS:
+        if present in tables.vowel_signs:
             return "matra"
-        if present == dv.VIRAMA:
+        if present in tables.joiners:
             return "conjunct"
         return "other"
-    if pair <= {dv.ANUSVARA, dv.CHANDRABINDU}:
+    pair = frozenset((r, h))
+    if pair <= tables.nasal_marks:
         return "nasalisation"
-    for label, table in (
-        ("aspiration", dv.ASPIRATION),
-        ("voicing", dv.VOICING),
-        ("retroflex_dental", dv.RETROFLEX_DENTAL),
-        ("sibilant", dv.SIBILANT),
-        ("vowel_length", dv.VOWEL_LENGTH),
-        ("visual", dv.VISUAL),
-    ):
+    for label, table in tables.phonetic.items():
         if pair in table:
             return label
-    if r in dv.MATRAS and h in dv.MATRAS:
+    if pair in tables.visual:
+        return "visual"
+    if r in tables.vowel_signs and h in tables.vowel_signs:
         return "matra"
     return "other"
-
-
-PHONETIC = {"aspiration", "voicing", "retroflex_dental", "sibilant", "vowel_length", "nasalisation"}
-VISUAL_LIKE = {"visual", "matra", "conjunct"}
-#: What Latin-script spelling cannot encode, so cannot be judged from it.
-ROMANISATION_BLIND = {"vowel_length", "retroflex_dental", "nasalisation"}
 
 
 @dataclass(frozen=True)
@@ -127,7 +123,7 @@ class Classification:
     char_diffs: tuple[tuple[str, str], ...]
 
 
-def classify_substitution(ref: str, hyp: str) -> Classification:
+def classify_substitution(ref: str, hyp: str, tables: ScriptTables) -> Classification:
     diffs = tuple(
         (ref[i] if i is not None else "", hyp[j] if j is not None else "")
         for kind, i, j in align(ref, hyp)
@@ -135,14 +131,19 @@ def classify_substitution(ref: str, hyp: str) -> Classification:
     )
     if hyp and ref.startswith(hyp) and len(hyp) < len(ref):
         return Classification("partial", ("incomplete",), diffs)
-    labels = tuple(_char_label(r, h) for r, h in diffs)
+    labels = tuple(char_label(r, h, tables) for r, h in diffs)
     if char_distance_ratio(ref, hyp) > 0.6 or "other" in labels:
         return Classification("different_word", labels, diffs)
-    kinds = {("phonetic" if l in PHONETIC else "visual") for l in labels}
+    phonetic = set(tables.phonetic) | {"nasalisation"}
+    kinds = {("phonetic" if label in phonetic else "visual") for label in labels}
     return Classification(kinds.pop() if len(kinds) == 1 else "mixed", labels, diffs)
 
 
-# -- scoring --------------------------------------------------------------------
+#: What Latin-script spelling cannot encode, so cannot be judged from it.
+ROMANISATION_BLIND = {"vowel_length", "retroflex_dental", "nasalisation"}
+
+
+# -- scoring ------------------------------------------------------------------------
 
 
 @dataclass
@@ -156,6 +157,8 @@ class WordOp:
     category: str | None = None
     subtypes: tuple[str, ...] = ()
     counts_as_mistake: bool = False
+    #: The rule that forgave this difference, when one did.
+    rule: str = ""
     note: str = ""
 
 
@@ -171,13 +174,20 @@ class ScoreResult:
     @property
     def correct(self) -> int:
         """Reference words read acceptably (matched, forgiven or self-corrected)."""
-        return sum(
-            1 for op in self.ops if op.ref_index is not None and not op.counts_as_mistake
-        )
+        return sum(1 for op in self.ops if op.ref_index is not None and not op.counts_as_mistake)
 
     @property
     def mistake_ref_indices(self) -> set[int]:
         return {op.ref_index for op in self.ops if op.counts_as_mistake and op.ref_index is not None}
+
+    @property
+    def mistake_words(self) -> list[dict]:
+        """Which words went wrong and how — the paragraph/story mistake detail."""
+        return [
+            {"word": op.ref, "heard": op.hyp, "kind": op.kind, "type": op.category, "sounds": list(op.subtypes)}
+            for op in self.ops
+            if op.counts_as_mistake
+        ]
 
     @property
     def mistake_profile(self) -> Counter:
@@ -190,17 +200,23 @@ class ScoreResult:
                     profile[f"sound:{subtype}"] += 1
         return profile
 
+    @property
+    def rules_applied(self) -> Counter:
+        return Counter(op.rule for op in self.ops if op.rule)
+
     def as_dict(self) -> dict:
         return {
             "mistakes": self.mistakes,
             "correct": self.correct,
             "ref_len": self.ref_len,
+            "mistake_words": self.mistake_words,
             "mistake_profile": dict(self.mistake_profile),
+            "rules_applied": dict(self.rules_applied),
             "ops": [op.__dict__ for op in self.ops],
         }
 
 
-def _is_restart_of(token: str, word: str) -> bool:
+def _is_restart_of(token: str, word: str, tables: ScriptTables) -> bool:
     """A false start: the word itself, its beginning, or a near-miss of either
     ("ग… घर" — the child began with the wrong sound and fixed it)."""
     if not token:
@@ -208,7 +224,7 @@ def _is_restart_of(token: str, word: str) -> bool:
     if word.startswith(token) or char_distance_ratio(token, word) <= 0.5:
         return True
     head = word[: len(token)]
-    return len(token) < len(word) and _char_label(head[0], token[0]) != "other" and (
+    return len(token) < len(word) and char_label(head[0], token[0], tables) != "other" and (
         char_distance_ratio(token, head) <= 0.5 or len(token) == 1
     )
 
@@ -220,54 +236,60 @@ def score(
     *,
     letter_task: bool = False,
     count_insertions: bool = False,
-    romanised: set[str] | frozenset[str] = frozenset(),
+    romanised: set[str] | frozenset[str] | list[str] = (),
 ) -> ScoreResult:
     """`romanised` are hyp words the ASR wrote in Latin script: their vowel
     length and dental/retroflex choice were guessed by the transliterator, so
     differences of exactly those kinds are not held against the child."""
+    tables = profile.tables
+    romanised = set(romanised)
     hyp_tokens = list(hyp_tokens)
+    mapped: set[int] = set()
     if letter_task:
         # Map each spoken-letter spelling back onto its letter before aligning.
-        variants = {v: r for r in ref_tokens for v in profile.letter_variants(r)}
+        variants = {v: r for r in ref_tokens for v in profile.letter_variants(r) if v != r}
+        mapped = {j for j, h in enumerate(hyp_tokens) if h in variants}
         hyp_tokens = [variants.get(h, h) for h in hyp_tokens]
 
-    raw = align(ref_tokens, hyp_tokens, word_sub_cost)
     ops: list[WordOp] = []
-    for kind, i, j in raw:
+    for kind, i, j in align(ref_tokens, hyp_tokens, word_sub_cost):
         ref = ref_tokens[i] if i is not None else None
         hyp = hyp_tokens[j] if j is not None else None
         op = WordOp(kind, ref, hyp, i)
+        if j in mapped:
+            op.rule = profile.letter_rule
         if kind == "substitution":
-            c = classify_substitution(ref, hyp)
+            c = classify_substitution(ref, hyp, tables)
             op.category, op.subtypes = c.category, c.subtypes
-            forgiven = c.char_diffs and all(
-                frozenset(d) in profile.forgiven_pairs for d in c.char_diffs
-            )
-            lossy = hyp in romanised and set(c.subtypes) <= ROMANISATION_BLIND
-            op.counts_as_mistake = not (forgiven or lossy)
-            if forgiven:
-                op.note = "forgiven: spelling-only difference"
-            elif lossy:
-                op.note = "forgiven: romanised ASR output cannot show this difference"
+            op.counts_as_mistake = True
+            for rule in profile.forgiveness:
+                if rule.applies(ref, hyp, c.char_diffs, c.subtypes):
+                    op.counts_as_mistake, op.rule = False, rule.id
+                    break
+            else:
+                if hyp in romanised and set(c.subtypes) <= ROMANISATION_BLIND:
+                    op.counts_as_mistake, op.rule = False, profile.romanised_rule
+                    op.note = "romanised ASR output cannot show this difference"
         elif kind == "deletion":
             op.counts_as_mistake = True
             op.note = "word not read"
         ops.append(op)
 
-    # Label insertions: ASER does not penalise repeats, restarts or fillers.
     for k, op in enumerate(ops):
         if op.kind != "insertion":
             continue
         prev_said = next((o.hyp for o in reversed(ops[:k]) if o.hyp is not None), None)
         nxt = next((o for o in ops[k + 1 :] if o.kind != "insertion"), None)
         if op.hyp in profile.fillers:
-            op.category = "filler"
+            op.category, op.rule = "filler", "S-03"
         elif op.hyp == prev_said or (nxt is not None and nxt.kind == "match" and op.hyp == nxt.ref):
-            op.category = "repetition"
-        elif nxt is not None and nxt.ref and _is_restart_of(op.hyp, nxt.ref):
-            op.category = "self_correction"
+            op.category, op.rule = "repetition", "S-01"
+        elif nxt is not None and nxt.ref and _is_restart_of(op.hyp, nxt.ref, tables):
+            op.category, op.rule = "self_correction", "S-02"
             op.note = f"restarted before reading {nxt.ref}"
         else:
             op.category = "extra_word"
             op.counts_as_mistake = count_insertions
+            if not count_insertions:
+                op.rule = "S-04"
     return ScoreResult(ops, len(ref_tokens))

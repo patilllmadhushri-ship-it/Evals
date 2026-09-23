@@ -4,6 +4,8 @@
     py -m readnet assess --lang hi --level paragraph --text "..." --transcript "..."
     py -m readnet assess --lang hi --level word --text "घर" --audio child.wav --provider sarvam
     py -m readnet evaluate levels.csv      # columns: human_level, system_level
+    py -m readnet benchmark --lang hi asr.csv     # columns: level, reference, hypothesis
+    py -m readnet confusions --lang hi pairs.csv  # columns: expected, heard
 """
 
 from __future__ import annotations
@@ -14,7 +16,7 @@ import json
 import sys
 from pathlib import Path
 
-from . import languages, metrics
+from . import benchmark, confusion, languages, metrics
 from .pipeline import assess_task
 
 
@@ -57,17 +59,36 @@ def cmd_assess(args) -> int:
         if op.kind == "match":
             continue
         flag = "MISTAKE" if op.counts_as_mistake else "ok     "
-        detail = ", ".join(filter(None, [op.category, "/".join(op.subtypes), op.note]))
+        detail = ", ".join(filter(None, [op.category, "/".join(op.subtypes), op.rule, op.note]))
         print(f"  {flag} {op.kind:<12} {op.ref or '-'} -> {op.hyp or '-'}  ({detail})")
     print(f"{outcome.level.label}: {'PASS' if outcome.passed else 'FAIL'} — {'; '.join(outcome.reasons)}")
     return 0
 
 
 def cmd_evaluate(args) -> int:
-    with open(args.csv, encoding="utf-8", newline="") as handle:
-        rows = list(csv.DictReader(handle))
+    rows = _rows(args.csv)
     report = metrics.level_agreement((r["human_level"], r["system_level"]) for r in rows)
     print(json.dumps(report.as_dict(), indent=2))
+    return 0
+
+
+def _rows(path: str) -> list[dict]:
+    with open(path, encoding="utf-8", newline="") as handle:
+        return list(csv.DictReader(handle))
+
+
+def cmd_benchmark(args) -> int:
+    print(benchmark.format_table(benchmark.benchmark(_rows(args.csv), args.lang)))
+    return 0
+
+
+def cmd_confusions(args) -> int:
+    matrix = confusion.estimate(((r["expected"], r["heard"]) for r in _rows(args.csv)), args.lang)
+    for expected, heard, count, rate in matrix.top(args.top):
+        print(f"{expected or '(none)'} -> {heard or '(dropped)'}  {count:>5}  {rate:6.1%}")
+    audit = confusion.audit(matrix, languages.get(args.lang).tables)
+    print()
+    print(f"frequent but not in the hand-made tables: {', '.join(audit['frequent_but_unlisted']) or 'none'}")
     return 0
 
 
@@ -93,6 +114,17 @@ def main(argv: list[str] | None = None) -> int:
     p = sub.add_parser("evaluate", help="agreement with human assessors")
     p.add_argument("csv")
     p.set_defaults(fn=cmd_evaluate)
+
+    p = sub.add_parser("benchmark", help="neutral ASR accuracy, split by level")
+    p.add_argument("csv")
+    p.add_argument("--lang", default="hi")
+    p.set_defaults(fn=cmd_benchmark)
+
+    p = sub.add_parser("confusions", help="estimate letter confusions from pairs")
+    p.add_argument("csv")
+    p.add_argument("--lang", default="hi")
+    p.add_argument("--top", type=int, default=20)
+    p.set_defaults(fn=cmd_confusions)
 
     args = parser.parse_args(argv)
     return args.fn(args)

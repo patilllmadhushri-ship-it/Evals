@@ -24,10 +24,18 @@ from pathlib import Path
 
 import numpy as np
 
-from readnet import languages, metrics
-from readnet.acoustic import AcousticEvidence, WordEvidence, ctc_forced_align, evidence_for_words, gop
+from readnet import benchmark, confusion, languages, metrics
+from readnet.acoustic import (
+    AcousticEvidence,
+    WordEvidence,
+    closed_set_decision,
+    ctc_forced_align,
+    evidence_for_words,
+    gop,
+)
 from readnet.aser import Level, Rules, TaskOutcome, next_task, place
 from readnet.pipeline import assess_item, assess_task
+from readnet.score import SHARED_RULES
 
 CASES = Path(__file__).with_name("field_cases.csv")
 
@@ -56,6 +64,23 @@ def test_field_cases():
     assert not failures, "\n".join(failures)
 
 
+def test_every_case_names_a_real_rule_and_every_rule_has_a_case():
+    cases = load_cases()
+    for code in languages.supported():
+        profile = languages.get(code)
+        known = profile.rule_ids() | SHARED_RULES
+        mine = [c for c in cases if c["language"] == code]
+        unknown = {c["id"]: c["rule"] for c in mine if c["rule"] not in known}
+        assert not unknown, f"{code}: cases cite rules that do not exist: {unknown}"
+        untested = profile.rule_ids() - {c["rule"] for c in mine}
+        assert not untested, f"{code}: rules with no field case: {sorted(untested)}"
+
+
+def test_forgiven_differences_cite_their_rule():
+    item = assess_item("मेरा गाँव बड़ा है", "मेरा गाव बड़ा है")
+    assert item.result.rules_applied == {"HI-20": 1}
+
+
 # -- normalisation ----------------------------------------------------------------
 
 
@@ -77,15 +102,14 @@ def test_nfd_input_equals_nfc():
 
 def test_zero_width_joiners_are_removed():
     profile = languages.get("hi")
-    assert profile.normalize("क्‍ष")[0] == profile.normalize("क्ष")[0]
-    assert profile.normalize("घर‌")[0] == "घर"
+    assert profile.normalize("क्\u200dष")[0] == profile.normalize("क्ष")[0]
+    assert profile.normalize("घर\u200c")[0] == "घर"
 
 
-def test_trace_records_what_changed():
+def test_trace_records_which_rule_changed_what():
     _, trace = languages.get("hi").normalize("ghar जाना।")
-    steps = [name for name, _, _ in trace.steps]
-    assert steps == ["transliterate", "strip_controls"], steps
-    assert trace.transliterated == ["ghar->घर"]
+    assert [rule for rule, _, _ in trace.steps] == ["HI-02", "HI-04"], trace.steps
+    assert trace.romanised_words == ["घर"]
 
 
 def test_locale_aliases():
@@ -225,6 +249,43 @@ def test_acoustic_doubt_is_flagged_not_counted_by_default():
     assert item.acoustic_doubts == ["घर"] and item.result.mistakes == 0
     counted = assess_item("घर", "घर", level="word", acoustic=evidence, gop_threshold=0.0, count_acoustic_doubts=True)
     assert counted.result.mistakes == 1
+
+
+def test_closed_set_letter_decision():
+    vocab = {"<pad>": 0, "घ": 1, "ग": 2, "ध": 3}
+    candidates = confusion.hand_made_confusions("घ", languages.get("hi").tables)
+    assert {"ग", "ध"} <= set(candidates)
+    said_gha = _emissions([0, 1, 1, 1, 0], len(vocab))
+    said_ga = _emissions([0, 2, 2, 2, 0], len(vocab))
+    ok = closed_set_decision(said_gha, "घ", candidates, vocab)
+    wrong = closed_set_decision(said_ga, "घ", candidates, vocab)
+    assert ok.accepted and ok.margin > 0
+    assert not wrong.accepted and wrong.best == "ग" and wrong.margin < 0
+
+
+# -- benchmark and confusions ------------------------------------------------------------
+
+
+def test_neutral_benchmark_does_not_borrow_forgiveness():
+    rows = [
+        {"level": "word", "reference": "गाँव", "hypothesis": "गाव"},  # forgiven for a child; an ASR error here
+        {"level": "word", "reference": "ज़रा", "hypothesis": "जरा"},  # not in the speech: neutral too
+        {"level": "paragraph", "reference": "मेरा घर बड़ा है", "hypothesis": "मेरा घर बड़ा है"},
+    ]
+    by_level = {r.level: r for r in benchmark.benchmark(rows, "hi")}
+    assert by_level["Word"].wer == 0.5 and by_level["Word"].forgiving_wer == 0.0  # the flattery
+    assert by_level["Paragraph"].wer == 0.0
+    assert "Letter" in benchmark.format_table(list(by_level.values()))  # flags the missing level
+
+
+def test_confusions_are_estimated_from_pairs():
+    pairs = [("घर", "गर"), ("घड़ा", "गड़ा"), ("घास", "गास"), ("धन", "घन"), ("घर", "घर")]
+    matrix = confusion.estimate(pairs, "hi")
+    assert matrix.counts[("घ", "ग")] == 3
+    assert matrix.confusions_of("घ") == ["ग"]
+    assert abs(matrix.rate("घ", "ग") - 3 / 4) < 1e-9  # घ was expected in 4 words
+    audit = confusion.audit(matrix, languages.get("hi").tables, min_count=1)
+    assert "ग/घ" not in audit["frequent_but_unlisted"]
 
 
 # -- agreement metrics -----------------------------------------------------------------

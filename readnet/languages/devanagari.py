@@ -1,20 +1,18 @@
-"""Script-level machinery shared by every Devanagari language module.
+"""Devanagari building blocks shared by the Hindi and Marathi rulebooks.
 
-Each language's ``normalize_xx.py`` is a thin configuration over the steps here:
-the steps themselves (NFC, transliteration, control-character removal, harmless
-diacritics, lexicon lookups) are the same for Hindi and Marathi, and what
-differs — which diacritics are harmless, which words must keep theirs, which
-spellings are interchangeable — is passed in as data.
-
-The order of the steps is fixed and not reversible. RULES.md in each language
-folder explains every step in plain English; this file is the executable copy.
+Nothing here is a rule by itself. Each language's ``normalize_xx.py`` has one
+function per rule, named after the rule in its RULES.md, and those functions
+call the helpers below. So a rule is read in RULES.md, found by its id in
+``normalize_xx.py``, and tested by the rows of ``tests/field_cases.csv`` that
+carry that id.
 """
 
 from __future__ import annotations
 
 import re
 import unicodedata
-from dataclasses import dataclass, field
+
+from . import ScriptTables, pairs
 
 # -- code points ---------------------------------------------------------------
 
@@ -30,14 +28,13 @@ ZWNJ = "\u200c"
 INVISIBLE = {ZWJ, ZWNJ, "\u200b", "\u2060", "\ufeff", "\u00ad"}
 
 CONSONANTS = set(chr(c) for c in range(0x0915, 0x093A)) | {"\u0931", "\u0933", "\u0934"}
-INDEPENDENT_VOWELS = set(chr(c) for c in range(0x0904, 0x0915)) | {"\u0960", "\u0961", "\u0972"}
 MATRAS = set(chr(c) for c in range(0x093E, 0x094D)) | {"\u0962", "\u0963"}
 
 _DEVANAGARI_DIGITS = {chr(0x0966 + i): str(i) for i in range(10)}
 
 #: Nasal + virama before a stop of its own class is the same sound as an
 #: anusvara: संत and सन्त, अंक and अङ्क. Keyed by nasal, valued by its class.
-_NASAL_CLASSES = {
+NASAL_CLASSES = {
     "ङ": set("कखगघ"),
     "ञ": set("चछजझ"),
     "ण": set("टठडढ"),
@@ -45,74 +42,41 @@ _NASAL_CLASSES = {
     "म": set("पफबभ"),
 }
 
-# -- phonetic and visual confusion tables (used by score.py) ------------------
-
-
-def _pairs(*pairs: str) -> frozenset[frozenset[str]]:
-    return frozenset(frozenset(p) for p in pairs)
-
-
-ASPIRATION = _pairs("कख", "गघ", "चछ", "जझ", "टठ", "डढ", "तथ", "दध", "पफ", "बभ")
-VOICING = _pairs("कग", "खघ", "चज", "छझ", "टड", "ठढ", "तद", "थध", "पब", "फभ")
-RETROFLEX_DENTAL = _pairs("टत", "ठथ", "डद", "ढध", "णन", "ळल")
-SIBILANT = _pairs("शष", "शस", "षस")
-VOWEL_LENGTH = frozenset(
-    frozenset(p)
-    for p in (("ि", "ी"), ("ु", "ू"), ("अ", "आ"), ("इ", "ई"), ("उ", "ऊ"), ("े", "ै"), ("ो", "ौ"))
+#: The hand-made confusion tables. The mature version is estimated from field
+#: data — see readnet/confusion.py — and should replace these once it exists.
+TABLES = ScriptTables(
+    phonetic={
+        "aspiration": pairs("कख", "गघ", "चछ", "जझ", "टठ", "डढ", "तथ", "दध", "पफ", "बभ"),
+        "voicing": pairs("कग", "खघ", "चज", "छझ", "टड", "ठढ", "तद", "थध", "पब", "फभ"),
+        "retroflex_dental": pairs("टत", "ठथ", "डद", "ढध", "णन", "ळल"),
+        "sibilant": pairs("शष", "शस", "षस"),
+        "vowel_length": frozenset(
+            frozenset(p)
+            for p in (("ि", "ी"), ("ु", "ू"), ("अ", "आ"), ("इ", "ई"), ("उ", "ऊ"), ("े", "ै"), ("ो", "ौ"))
+        ),
+    },
+    # Look alike, sound different: घ/ध and भ/म differ by one stroke.
+    visual=pairs("घध", "भम", "बव", "पष", "थय", "ङड", "मस", "नल"),
+    vowel_signs=frozenset(MATRAS),
+    nasal_marks=frozenset({ANUSVARA, CHANDRABINDU}),
+    joiners=frozenset({VIRAMA}),
+    #: Adding or dropping ा is a length error, not a missing vowel.
+    length_marks=frozenset({"ा"}),
 )
-#: Letters children (and adults) confuse because they look alike, not because
-#: they sound alike: घ/ध and भ/म differ by one stroke, ख is written like रव.
-VISUAL = _pairs("घध", "भम", "बव", "पष", "थय", "ङड", "मस", "नल")
+
+# -- helpers the rule functions call -------------------------------------------------
 
 
-# -- normalisation --------------------------------------------------------------
-
-
-@dataclass
-class Trace:
-    """What each normalisation step changed, for debugging a disputed verdict."""
-
-    steps: list[tuple[str, str, str]] = field(default_factory=list)
-    transliterated: list[str] = field(default_factory=list)
-    #: The Devanagari words that came from Latin script. Romanisation cannot
-    #: show vowel length or dental vs retroflex, so the scorer forgives those
-    #: differences on these words rather than blame the child for them.
-    romanised_words: set[str] = field(default_factory=set)
-
-    def record(self, step: str, before: str, after: str) -> None:
-        if before != after:
-            self.steps.append((step, before, after))
-
-
-@dataclass(frozen=True)
-class NormalizationConfig:
-    """What a language decides; the steps are shared."""
-
-    #: Consonants whose nukta is a real phoneme and must be kept (Hindi ड़/ढ़).
-    keep_nukta_on: frozenset[str] = frozenset()
-    #: Treat chandrabindu as anusvara (except on protected words).
-    chandrabindu_to_anusvara: bool = True
-    #: Words where a diacritic changes the word: never stripped.
-    protected_words: frozenset[str] = frozenset()
-    #: Interchangeable spellings of the same spoken word -> one canonical form.
-    spelling_variants: dict[str, str] = field(default_factory=dict)
-    #: Extra single-character unifications applied everywhere (ॲ -> ऍ, ऱ -> र).
-    char_unifications: dict[str, str] = field(default_factory=dict)
-
-
-def step_nfc(text: str) -> str:
-    """Step 1. One byte sequence per visible character.
-
-    NFC also *decomposes* the precomposed nukta letters (क़ U+0958 becomes
-    क + ़), which is what lets step 4 treat every nukta the same way.
-    """
+def nfc(text: str) -> str:
+    """NFC also decomposes the precomposed nukta letters (क़ U+0958 -> क + ़),
+    which is what lets one rule treat every nukta the same way."""
     return unicodedata.normalize("NFC", text)
 
 
-# Romanised Hindi/Marathi, longest match first. This is a fallback for an ASR
-# engine that answers in Latin script; it cannot resolve every ambiguity
-# (t is त or ट, final a is अ or आ), so transliterated words are logged in the
-# trace and a disputed verdict on one should be read with that in mind.
+# Romanised Hindi/Marathi, longest match first. A fallback for an engine that
+# answers in Latin script; it cannot resolve every ambiguity (t is त or ट,
+# i is ि or ी), which is why score.py forgives exactly those differences on
+# words that came through here.
 _LATIN_CONSONANTS = [
     ("chh", "छ"), ("ksh", "क्ष"), ("kh", "ख"), ("gh", "घ"), ("ch", "च"), ("jh", "झ"),
     ("th", "थ"), ("dh", "ध"), ("ph", "फ"), ("bh", "भ"), ("sh", "श"),
@@ -174,16 +138,18 @@ def transliterate_latin_word(word: str) -> str:
 _LATIN_RUN = re.compile(r"[A-Za-z]+")
 
 
-def step_transliterate(text: str, trace: Trace) -> str:
-    """Step 2. Latin-script words back to Devanagari; Devanagari digits to ASCII."""
+def romanised_to_devanagari(text: str, converted: list[str]) -> str:
+    """Latin words -> Devanagari; appends each converted word to `converted`."""
 
     def swap(match: re.Match) -> str:
-        converted = transliterate_latin_word(match.group(0))
-        trace.transliterated.append(f"{match.group(0)}->{converted}")
-        trace.romanised_words.add(converted)
-        return converted
+        word = transliterate_latin_word(match.group(0))
+        converted.append(word)
+        return word
 
-    text = _LATIN_RUN.sub(swap, text)
+    return _LATIN_RUN.sub(swap, text)
+
+
+def digits_to_ascii(text: str) -> str:
     return "".join(_DEVANAGARI_DIGITS.get(ch, ch) for ch in text)
 
 
@@ -191,30 +157,38 @@ def _is_word_char(ch: str) -> bool:
     return ("\u0900" <= ch <= "\u097f" and ch not in "\u0964\u0965\u0970") or ch.isdigit()
 
 
-def step_strip_controls(text: str) -> str:
-    """Step 3. Drop ZWJ/ZWNJ and other invisible marks; punctuation becomes space."""
+def strip_invisible_and_punctuation(text: str) -> str:
     text = "".join(ch for ch in text if ch not in INVISIBLE)
     text = "".join(ch if _is_word_char(ch) else " " for ch in text)
     return " ".join(text.split())
 
 
-def _strip_word(word: str, config: NormalizationConfig) -> str:
+def per_word(text: str, fn, skip: frozenset[str] = frozenset()) -> str:
+    return " ".join(word if word in skip else fn(word) for word in text.split())
+
+
+def drop_nukta(word: str, keep_on: frozenset[str] = frozenset()) -> str:
+    out: list[str] = []
+    for ch in word:
+        if ch == NUKTA and not (out and out[-1] in keep_on):
+            continue
+        out.append(ch)
+    return "".join(out)
+
+
+def chandrabindu_to_anusvara(word: str) -> str:
+    return word.replace(CHANDRABINDU, ANUSVARA)
+
+
+def class_nasal_to_anusvara(word: str) -> str:
     out: list[str] = []
     for i, ch in enumerate(word):
-        ch = config.char_unifications.get(ch, ch)
-        if ch == NUKTA:
-            if out and out[-1] in config.keep_nukta_on:
-                out.append(ch)
-            continue
-        if ch == CHANDRABINDU and config.chandrabindu_to_anusvara:
-            ch = ANUSVARA
-        # Class nasal + virama before a same-class stop -> anusvara.
         if (
             ch == VIRAMA
             and out
-            and out[-1] in _NASAL_CLASSES
+            and out[-1] in NASAL_CLASSES
             and i + 1 < len(word)
-            and word[i + 1] in _NASAL_CLASSES[out[-1]]
+            and word[i + 1] in NASAL_CLASSES[out[-1]]
         ):
             out[-1] = ANUSVARA
             continue
@@ -222,38 +196,12 @@ def _strip_word(word: str, config: NormalizationConfig) -> str:
     return "".join(out)
 
 
-def step_harmless_diacritics(text: str, config: NormalizationConfig) -> str:
-    """Step 4 (guarded by step 5's protected-word list, checked first per word)."""
-    return " ".join(
-        word if word in config.protected_words else _strip_word(word, config)
-        for word in text.split()
-    )
+def unify_chars(text: str, mapping: dict[str, str]) -> str:
+    return "".join(mapping.get(ch, ch) for ch in text)
 
 
-def step_lexicon(text: str, config: NormalizationConfig) -> str:
-    """Step 5. Word-level lookups: fold interchangeable spellings to one form."""
-    return " ".join(config.spelling_variants.get(word, word) for word in text.split())
-
-
-def normalize(text: str, config: NormalizationConfig) -> tuple[str, Trace]:
-    trace = Trace()
-    for name, fn in (
-        ("nfc", step_nfc),
-        ("transliterate", lambda t: step_transliterate(t, trace)),
-        ("strip_controls", step_strip_controls),
-        ("harmless_diacritics", lambda t: step_harmless_diacritics(t, config)),
-        ("lexicon", lambda t: step_lexicon(t, config)),
-    ):
-        before = text
-        text = fn(text)
-        trace.record(name, before, text)
-    return text, trace
-
-
-def protected(*words: str) -> frozenset[str]:
-    """Protected words are matched after NFC, so store them that way."""
-    return frozenset(unicodedata.normalize("NFC", w) for w in words)
-
-
-def variants(mapping: dict[str, str]) -> dict[str, str]:
-    return {unicodedata.normalize("NFC", k): unicodedata.normalize("NFC", v) for k, v in mapping.items()}
+def consonant_letter_variants(letter: str) -> set[str]:
+    """A child reading क says "ka"; engines write that as क, का or कअ."""
+    if len(letter) == 1 and letter in CONSONANTS:
+        return {letter, letter + "ा", letter + "अ"}
+    return {letter}

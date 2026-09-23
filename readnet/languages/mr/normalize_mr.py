@@ -1,34 +1,75 @@
-"""Marathi normalisation. Every rule here is explained for non-programmers in
-RULES.md next to this file — change the two together."""
+"""Marathi rulebook, executable copy.
+
+One function per rule in RULES.md, named after the rule id. Read the two side
+by side, and change them in the same commit. Deterministic; no model calls.
+"""
 
 from __future__ import annotations
 
-from .. import LanguageProfile
+from .. import Forgiveness, LanguageProfile, Rule, Trace
 from .. import devanagari as dv
-from ..hi.normalize_hi import letter_variants
 
-CONFIG = dv.NormalizationConfig(
-    # Marathi has no native nukta sounds; every dot is dropped.
-    keep_nukta_on=frozenset(),
-    chandrabindu_to_anusvara=True,
-    # Deliberately empty until a Marathi linguist supplies real minimal pairs.
-    protected_words=frozenset(),
-    spelling_variants={},
-    # ॲ and ऍ both write the English "a" in बॅट/ॲप; the eyelash ऱ in ऱ्या is
-    # the same र sound. ळ is NOT unified with ल — they are different sounds.
-    char_unifications={"ॲ": "ऍ", "ऱ": "र"},
+
+def mr_01_unicode_nfc(text: str, trace: Trace) -> str:
+    return dv.nfc(text)
+
+
+def mr_02_romanised_to_devanagari(text: str, trace: Trace) -> str:
+    return dv.romanised_to_devanagari(text, trace.romanised_words)
+
+
+def mr_03_one_digit_set(text: str, trace: Trace) -> str:
+    return dv.digits_to_ascii(text)
+
+
+def mr_04_strip_invisible_and_punctuation(text: str, trace: Trace) -> str:
+    return dv.strip_invisible_and_punctuation(text)
+
+
+def mr_05_nukta_is_silent(text: str, trace: Trace) -> str:
+    # Marathi has no native sounds written with a nukta.
+    return dv.per_word(text, dv.drop_nukta)
+
+
+def mr_06_chandrabindu_equals_anusvara(text: str, trace: Trace) -> str:
+    return dv.per_word(text, dv.chandrabindu_to_anusvara)
+
+
+def mr_08_class_nasal_equals_anusvara(text: str, trace: Trace) -> str:
+    return dv.per_word(text, dv.class_nasal_to_anusvara)
+
+
+def mr_09_one_letter_one_code(text: str, trace: Trace) -> str:
+    # ॲ/ऍ are one letter; eyelash ऱ is the same र sound. ळ is NOT ल.
+    return dv.unify_chars(text, {"ॲ": "ऍ", "ऱ": "र"})
+
+
+RULES = (
+    Rule("MR-01", mr_01_unicode_nfc, neutral=True),
+    Rule("MR-02", mr_02_romanised_to_devanagari, neutral=True),
+    Rule("MR-03", mr_03_one_digit_set, neutral=True),
+    Rule("MR-04", mr_04_strip_invisible_and_punctuation, neutral=True),
+    Rule("MR-05", mr_05_nukta_is_silent, neutral=True),
+    Rule("MR-06", mr_06_chandrabindu_equals_anusvara, neutral=True),
+    Rule("MR-08", mr_08_class_nasal_equals_anusvara, neutral=True),
+    Rule("MR-09", mr_09_one_letter_one_code, neutral=True),
 )
 
 
-def normalize_mr(text: str) -> tuple[str, dv.Trace]:
-    return dv.normalize(text, CONFIG)
+def mr_22_sha_ssa_same_sound(expected, heard, diffs, labels) -> bool:
+    return bool(diffs) and all(frozenset((r, h)) == frozenset("शष") for r, h in diffs)
 
 
 PROFILE = LanguageProfile(
     code="mr",
     name="Marathi",
-    normalize=normalize_mr,
+    rules=RULES,
+    tables=dv.TABLES,
+    # No dropped-nasal rule: in Marathi the anusvara often carries grammar
+    # (plural/oblique), so that decision waits for a Marathi linguist.
+    forgiveness=(Forgiveness("MR-22", mr_22_sha_ssa_same_sound),),
     fillers=frozenset({"अ", "अं", "आं", "उम", "उम्म", "हम्म", "हं", "एं"}),
-    forgiven_pairs=frozenset({frozenset("शष")}),
-    letter_variants=letter_variants,
+    letter_variants=dv.consonant_letter_variants,
+    letter_rule="MR-23",
+    romanised_rule="MR-24",
 )

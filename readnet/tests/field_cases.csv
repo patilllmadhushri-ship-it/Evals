@@ -1,43 +1,63 @@
-id,language,level,canonical,transcript,expected_mistakes,expected_correct,note
-hi-exact,hi,paragraph,मेरा नाम सीता है। मैं स्कूल जाती हूँ।,मेरा नाम सीता है मैं स्कूल जाती हूँ,0,8,Word-perfect reading; danda is punctuation not a word
-hi-chandrabindu,hi,paragraph,मैं स्कूल जाती हूँ,मैं स्कूल जाती हूं,0,4,ASR writes anusvara for chandrabindu — same sound
-hi-nukta-loan,hi,word,ज़रा,जरा,0,1,Urdu nukta is not pronounced by most Hindi speakers
-hi-nukta-native,hi,word,पढ़,पड़,1,0,ढ़/ड़ are native sounds: the dot is kept and this is a real (aspiration) error
-hi-panchama,hi,word,अंक,अङ्क,0,1,Nasal+virama before same-class stop is an anusvara spelling
-hi-panchama-2,hi,word,संत,सन्त,0,1,Same rule for dental class
-hi-na-ha-kept,hi,word,तुम्हारा,तुमहारा,1,0,म्ह is a real cluster not a class nasal — dropped virama is an error
-hi-variant-gayi,hi,paragraph,वह घर गयी,वह घर गई,0,3,Interchangeable spelling of one spoken word
-hi-variant-liye,hi,paragraph,उसके लिये,उसके लिए,0,2,Interchangeable spelling of one spoken word
-hi-punct,hi,paragraph,"राम, श्याम और गीता!",राम श्याम और गीता,0,4,Commas and exclamation marks carry no sound
-hi-latin,hi,word,घर,ghar,0,1,Romanised ASR output is transliterated back
-hi-latin-final-a,hi,word,सीता,sita,0,1,Word-final a in romanised Hindi is aa
-hi-digits,hi,paragraph,५ आम,5 आम,0,2,Devanagari and ASCII digits are the same number
-hi-aspiration,hi,word,घर,गर,1,0,Phonetic substitution (aspiration)
-hi-voicing,hi,word,दाल,ताल,1,0,Phonetic substitution (voicing)
-hi-vowel-length,hi,word,दिन,दीन,1,0,Short/long i is a real reading error
-hi-visual,hi,word,धन,घन,1,0,Visual confusion ध/घ
-hi-protected-hans,hi,word,हँस,हंस,1,0,laugh vs swan: protected pair keeps the chandrabindu
-hi-sibilant-forgiven,hi,word,विशेष,विशेश,0,1,श/ष are one sound for Hindi speakers and ASR spells either
-hi-deletion,hi,paragraph,मेरा नाम सीता है,मेरा सीता है,1,3,Skipped a word
-hi-stopped-halfway,hi,paragraph,मेरा नाम सीता है। मैं स्कूल जाती हूँ।,मेरा नाम सीता है,4,4,Stopped reading: every unread word counts
-hi-repetition,hi,paragraph,मेरा घर बड़ा है,मेरा घर घर बड़ा है,0,4,Repeating a word is not a mistake under ASER
-hi-self-correction,hi,paragraph,मेरा घर बड़ा है,मेरा गर घर बड़ा है,0,4,Child corrected themselves
-hi-false-start,hi,paragraph,मेरा घर बड़ा है,मेरा ग घर बड़ा है,0,4,Began with the wrong sound then read the word
-hi-filler,hi,paragraph,मेरा घर बड़ा है,मेरा उम्म घर बड़ा है,0,4,Hesitation sound
-hi-extra-word,hi,paragraph,मेरा घर बड़ा है,मेरा घर बहुत बड़ा है,0,4,Extra word is not counted by default (usually ASR hallucination)
-hi-two-subs,hi,paragraph,राजा ने रानी को देखा,राजा ने राणी को देका,2,3,Two separate substitutions
-hi-partial,hi,paragraph,बाज़ार जाना है,बा जाना है,1,2,Left a word incomplete
-hi-letter-exact,hi,letter,क,क,0,1,
-hi-letter-schwa,hi,letter,क,का,0,1,Engines spell a spoken letter ka as का
-hi-letter-latin,hi,letter,क,ka,0,1,Engines sometimes answer in Latin
-hi-letter-wrong,hi,letter,क,ख,1,0,Wrong letter
-hi-letter-list,hi,letter,क म स ल र,क म श ल र,1,4,One recording of five letters (स/श is only forgiven for श/ष)
-hi-word-list,hi,word,घर पानी आम नाक कमल,घर पानी आम नाक कमाल,1,4,One recording of five words
-hi-empty,hi,paragraph,मेरा घर बड़ा है,,4,0,Silence or nothing recognised
-mr-exact,mr,paragraph,माझे नाव राम आहे.,माझे नाव राम आहे,0,4,Word-perfect Marathi
-mr-candra,mr,word,ॲप,ऍप,0,1,Two code points for the same English a
-mr-eyelash-ra,mr,word,दऱ्या,दर्या,0,1,Eyelash ra is the same र sound
-mr-la-kept,mr,word,शाळा,शाला,1,0,ळ and ल are different sounds in Marathi
-mr-deletion,mr,paragraph,आज शाळेला सुट्टी आहे,आज सुट्टी आहे,1,3,Skipped a word
-mr-repetition,mr,paragraph,आज शाळेला सुट्टी आहे,आज आज शाळेला सुट्टी आहे,0,4,Repeating is not a mistake
-mr-aspiration,mr,word,भात,बात,1,0,Phonetic substitution (aspiration)
+id,language,level,canonical,transcript,expected_mistakes,expected_correct,rule,note
+hi-exact,hi,paragraph,मेरा नाम सीता है। मैं स्कूल जाती हूँ।,मेरा नाम सीता है मैं स्कूल जाती हूँ,0,8,HI-04,Word-perfect reading; danda is punctuation not a word
+hi-nfd,hi,word,क़िला,क़िला,0,1,HI-01,"Same visible word, different bytes"
+hi-zwj,hi,word,क्षमा,क्‍षमा,0,1,HI-04,Zero-width joiner changes rendering only
+hi-zwnj,hi,word,घर,घर‌,0,1,HI-04,Zero-width non-joiner changes rendering only
+hi-punct,hi,paragraph,"राम, श्याम और गीता!",राम श्याम और गीता,0,4,HI-04,Punctuation carries no sound
+hi-latin,hi,word,घर,ghar,0,1,HI-02,Romanised ASR output is transliterated back (Reason 5)
+hi-latin-length,hi,word,सीता,sita,0,1,HI-24,Latin script cannot show vowel length; not held against the child
+hi-latin-real-error,hi,word,घर,gar,1,0,HI-24,Romanisation forgives only what Latin cannot show; aspiration still counts
+hi-digits,hi,paragraph,५ आम,5 आम,0,2,HI-03,Devanagari and ASCII digits are the same number
+hi-nukta-loan,hi,word,ज़रा,जरा,0,1,HI-05,Urdu nukta is not pronounced by most Hindi speakers
+hi-nukta-native,hi,word,पढ़,पड़,1,0,HI-05,ढ़/ड़ keep their dot: a real (aspiration) error
+hi-chandrabindu,hi,paragraph,मैं स्कूल जाती हूँ,मैं स्कूल जाती हूं,0,4,HI-06,Chandrabindu and anusvara are one nasal marker
+hi-protected-hans,hi,word,हँस,हंस,1,0,HI-07,laugh vs swan: the protected word keeps its chandrabindu
+hi-panchama,hi,word,अंक,अङ्क,0,1,HI-08,Nasal+virama before same-class stop is an anusvara spelling
+hi-panchama-2,hi,word,संत,सन्त,0,1,HI-08,Same rule for dental class
+hi-na-ha-kept,hi,word,तुम्हारा,तुमहारा,1,0,HI-08,"म्ह is a real cluster, not a class nasal"
+mr-candra,mr,word,ॲप,ऍप,0,1,MR-09,Two code points for the same English a
+hi-variant-gayi,hi,paragraph,वह घर गयी,वह घर गई,0,3,HI-10,Interchangeable spelling of one spoken word
+hi-variant-liye,hi,paragraph,उसके लिये,उसके लिए,0,2,HI-10,Interchangeable spelling of one spoken word
+hi-dropped-nasal-gaon,hi,word,गाँव,गाव,0,1,HI-20,"Reason 2: word read, only nasalisation missing — not assessed"
+hi-dropped-nasal-para,hi,paragraph,मेरा गाँव बड़ा है,मेरा गाव बड़ा है,0,4,HI-20,Same rule inside a paragraph
+hi-dropped-nasal-chaand,hi,word,चाँद,चाद,1,0,HI-21,"Reason 3: same surface difference, but the word is destroyed"
+hi-added-nasal,hi,word,गाव,गांव,1,0,S-00,"Only a dropped nasal is forgiven, not an added one"
+hi-sibilant,hi,word,विशेष,विशेश,0,1,HI-22,श/ष are one sound for Hindi speakers
+hi-sibilant-sa,hi,word,शेर,सेर,1,0,S-00,स for श is not forgiven (open question in RULES.md)
+hi-letter-schwa,hi,letter,क,का,0,1,HI-23,Engines spell a spoken letter ka as का
+hi-letter-latin,hi,letter,क,ka,0,1,HI-02,Engines sometimes answer in Latin
+hi-letter-exact,hi,letter,क,क,0,1,S-00,
+hi-letter-wrong,hi,letter,क,ख,1,0,S-00,Wrong letter
+hi-letter-list,hi,letter,क म स ल र,क म श ल र,1,4,S-00,One recording of five letters
+hi-aspiration,hi,word,घर,गर,1,0,S-00,Reason 1: aspiration dropped — count it
+hi-voicing,hi,word,दाल,ताल,1,0,S-00,Voicing
+hi-vowel-length,hi,word,दिन,दीन,1,0,S-00,Short/long i is a real reading error
+hi-visual,hi,word,धन,घन,1,0,S-00,Visual confusion ध/घ
+hi-word-list,hi,word,घर पानी आम नाक कमल,घर पानी आम नाक कमाल,1,4,S-00,One recording of five words
+hi-two-subs,hi,paragraph,राजा ने रानी को देखा,राजा ने राणी को देका,2,3,S-00,Two separate substitutions
+hi-partial,hi,paragraph,बाज़ार जाना है,बा जाना है,1,2,S-00,Left a word incomplete
+hi-deletion,hi,paragraph,मेरा नाम सीता है,मेरा सीता है,1,3,S-00,Skipped a word
+hi-stopped-halfway,hi,paragraph,मेरा नाम सीता है। मैं स्कूल जाती हूँ।,मेरा नाम सीता है,4,4,S-00,Stopped reading: every unread word counts
+hi-empty,hi,paragraph,मेरा घर बड़ा है,,4,0,S-00,Silence or nothing recognised
+hi-repetition,hi,paragraph,मेरा घर बड़ा है,मेरा घर घर बड़ा है,0,4,S-01,Repeating a word is not a mistake
+hi-self-correction,hi,paragraph,मेरा घर बड़ा है,मेरा गर घर बड़ा है,0,4,S-02,Child corrected themselves
+hi-false-start,hi,paragraph,मेरा घर बड़ा है,मेरा ग घर बड़ा है,0,4,S-02,Began with the wrong sound then read the word
+hi-filler,hi,paragraph,मेरा घर बड़ा है,मेरा उम्म घर बड़ा है,0,4,S-03,Hesitation sound
+hi-extra-word,hi,paragraph,मेरा घर बड़ा है,मेरा घर बहुत बड़ा है,0,4,S-04,"Extra word reported, not counted (usually ASR hallucination)"
+mr-exact,mr,paragraph,माझे नाव राम आहे.,माझे नाव राम आहे,0,4,MR-04,Word-perfect Marathi
+mr-nfd,mr,word,शाळा,शाळा,0,1,MR-01,"Same visible word, different bytes"
+mr-latin,mr,word,घर,ghar,0,1,MR-02,Romanised output
+mr-latin-length,mr,word,पाणी,paani,0,1,MR-24,Latin cannot show retroflex ण
+mr-digits,mr,paragraph,५ आंबे,5 आंबे,0,2,MR-03,Digits
+mr-nukta,mr,word,ज़िल्हा,जिल्हा,0,1,MR-05,No native nukta sounds in Marathi
+mr-chandrabindu,mr,word,घाँव,घांव,0,1,MR-06,One nasal marker
+mr-panchama,mr,word,आंबा,आम्बा,0,1,MR-08,Class nasal equals anusvara
+mr-eyelash-ra,mr,word,दऱ्या,दर्या,0,1,MR-09,Eyelash ra is the same र sound
+mr-la-kept,mr,word,शाळा,शाला,1,0,MR-09,ळ and ल are different sounds in Marathi
+mr-sibilant,mr,word,विशेष,विशेश,0,1,MR-22,श/ष
+mr-letter,mr,letter,क,का,0,1,MR-23,Spoken letter spelled with its vowel
+mr-dropped-nasal,mr,word,घरांत,घरात,1,0,S-00,Marathi has no dropped-nasal rule yet: counted
+mr-deletion,mr,paragraph,आज शाळेला सुट्टी आहे,आज सुट्टी आहे,1,3,S-00,Skipped a word
+mr-aspiration,mr,word,भात,बात,1,0,S-00,Aspiration
+mr-repetition,mr,paragraph,आज शाळेला सुट्टी आहे,आज आज शाळेला सुट्टी आहे,0,4,S-01,Repeating is not a mistake
+hi-candra-a,hi,word,ॲप,ऍप,0,1,HI-09,Two code points for the same English a
