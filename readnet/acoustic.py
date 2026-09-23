@@ -101,19 +101,39 @@ def _viterbi(log_probs: np.ndarray, targets: Sequence[int], blank: int) -> tuple
 class TokenGop:
     token_index: int
     mean_log_posterior: float  # the blueprint's GOP(p)
-    llr: float  # mean of log P(p|O_t) - max_{q != p} log P(q|O_t); <= 0 when p is out-scored
+    #: At the frame where the expected token is strongest, its log-probability
+    #: minus the strongest alternative — another token *or blank* ("nothing
+    #: here"). Positive: the sound was said. Negative: something else was
+    #: said, or nothing was.
+    llr: float
+    #: What the audio holds instead when llr < 0: another token's id, or
+    #: `blank` when the sound was simply not said.
+    heard: int
 
 
 def gop(log_probs: np.ndarray, spans: Sequence[TokenSpan], targets: Sequence[int], blank: int = 0) -> list[TokenGop]:
+    """GOP per aligned token.
+
+    Blank must be a rival. Forced alignment always places every expected
+    token somewhere; if the reader skipped a sound (चाँद read as चाद), its
+    frames belong to blank, and a GOP that compared it only with other letters
+    would still find it the best *letter* there and call it fine. A sound is
+    judged present when, at its strongest frame, it beats everything —
+    blank included. CTC outputs are peaky (a token usually owns one or two
+    frames), so the strongest frame is taken rather than the span average.
+    """
     log_probs = np.asarray(log_probs, dtype=np.float64)
     out: list[TokenGop] = []
     for span in spans:
         target = targets[span.token_index]
         frames = log_probs[span.start : span.end]
         own = frames[:, target]
-        rivals = frames.copy()
-        rivals[:, [target, blank]] = -np.inf
-        out.append(TokenGop(span.token_index, float(own.mean()), float((own - rivals.max(axis=1)).mean())))
+        others = frames.copy()
+        others[:, target] = -np.inf
+        margin = own - others.max(axis=1)
+        k = int(np.argmax(margin))
+        heard = target if margin[k] > 0 else int(np.argmax(others[k]))
+        out.append(TokenGop(span.token_index, float(own.mean()), float(margin[k]), heard))
     return out
 
 
@@ -267,7 +287,10 @@ class UnitEvidence:
     start_s: float
     end_s: float
     gop: float  # mean log posterior — the blueprint's GOP(p)
-    llr: float  # versus the strongest rival — what the app shows
+    llr: float  # versus the strongest rival, blank included — what the app shows
+    #: What the audio holds at this position: the unit itself, another unit,
+    #: or "" when the sound was not said.
+    heard: str = ""
 
 
 @dataclass
@@ -313,6 +336,7 @@ def evidence_for_words(
     a phoneme model. Without it the word's letters are used (letter model).
     """
     target = targets_for_words(units if units is not None else words, vocab, word_delimiter)
+    by_id = {i: tok for tok, i in vocab.items()}
     spans = ctc_forced_align(log_probs, target.ids, blank)
     scores = gop(log_probs, spans, target.ids, blank)
     evidence: list[WordEvidence] = []
@@ -330,7 +354,8 @@ def evidence_for_words(
                 weakest.llr,
                 [
                     UnitEvidence(unit, spans[k].start * frame_seconds, spans[k].end * frame_seconds,
-                                 scores[k].mean_log_posterior, scores[k].llr)
+                                 scores[k].mean_log_posterior, scores[k].llr,
+                                 "" if scores[k].heard == blank else by_id.get(scores[k].heard, ""))
                     for unit, k in zip(kept, range(a, b))
                 ],
             )

@@ -39,11 +39,16 @@
             <input id="model-id" type="text" spellcheck="false">
           </label>
           <label class="field">
-            <span class="field-label">Flag words with GOP below <b id="gop-value">0.0</b></span>
-            <input id="gop" type="range" min="-10" max="2" step="0.5" value="0">
-            <span class="field-note">Uncalibrated. Flagged words are shown for review, never counted.</span>
+            <span class="field-label">Flag words with GOP below <b id="gop-value">-1.0</b></span>
+            <input id="gop" type="range" min="-10" max="2" step="0.5" value="-1">
+            <span class="field-note">Uncalibrated. In testing, correctly read sounds scored above 0 and dropped or wrong sounds below -2.</span>
           </label>
           <span class="field-note" id="gop-note"></span>
+          <label class="check">
+            <input id="audio-decides" type="checkbox" checked>
+            <span><b>Let the audio correct the transcript</b><br>
+              <span class="field-note">Speech engines write the dictionary word (चाद comes back as चाँद). When a sound scores below the threshold, the word is rebuilt from what the audio holds and judged by the same rules.</span></span>
+          </label>
         </div>
       </div>
       <label class="field">
