@@ -243,6 +243,37 @@ def test_forced_alignment_over_phonemes():
     assert all(u.llr > 0 for u in units)
 
 
+def test_audio_corrects_a_dictionary_word_transcript():
+    # The engine wrote चाँद; the audio has no nasal. The rebuilt word goes
+    # through the normal rulebook, so the decision is the rule's, not the code's.
+    from readnet.acoustic import UnitEvidence
+
+    def evidence(word: str, nasal_llr: float, nasal_heard: str) -> AcousticEvidence:
+        units = [UnitEvidence(ch, 0, 0, 0, 5.0, ch) for ch in word]
+        units = [UnitEvidence(u.unit, 0, 0, 0, nasal_llr, nasal_heard) if u.unit == "ं" else u for u in units]
+        return AcousticEvidence([WordEvidence(word, 0, 1, 0, min(u.llr for u in units), units)])
+
+    dropped = assess_item("चाँद", "चाँद", acoustic=evidence("चांद", -3.0, ""), gop_threshold=-1, audio_decides=True)
+    assert dropped.result.mistakes == 1 and dropped.result.ops[0].hyp == "चाद"  # HI-21: the word is destroyed
+    forgiven = assess_item("गाँव", "गाँव", acoustic=evidence("गांव", -3.0, ""), gop_threshold=-1, audio_decides=True)
+    assert forgiven.result.mistakes == 0 and forgiven.result.ops[0].rule == "HI-20"  # meaning survives
+    # A model that split the nasal between ं and ँ heard the same sound (HI-06).
+    split = assess_item("चाँद", "चाँद", acoustic=evidence("चांद", -1.5, "ँ"), gop_threshold=-1, audio_decides=True)
+    assert split.result.mistakes == 0
+    # Off by default in the library: the transcript alone decides.
+    off = assess_item("चाँद", "चाँद", acoustic=evidence("चांद", -3.0, ""), gop_threshold=-1)
+    assert off.result.mistakes == 0
+
+
+def test_gop_treats_silence_as_a_rival():
+    # Expected token 2 was never said: its frames are all blank.
+    log_probs = _emissions([0, 1, 1, 0, 0, 0, 3, 0], 4)
+    targets = [1, 2, 3]
+    scores = gop(log_probs, ctc_forced_align(log_probs, targets), targets)
+    assert scores[0].llr > 0 and scores[2].llr > 0
+    assert scores[1].llr < 0 and scores[1].heard == 0  # heard: nothing (blank)
+
+
 def test_ctc_aligns_long_sequences():
     # 100 tokens = 201 CTC states: past int8, which once overflowed the backtrack.
     targets = [1 + (i % 5) for i in range(100)]

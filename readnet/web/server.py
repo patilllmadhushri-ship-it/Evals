@@ -191,7 +191,8 @@ def unit_rows(word: str, units, phoneme_units: bool) -> list[dict]:
                 label = sounds[pos]
                 pos += 1
         rows.append({"letter": None if phoneme_units else u.unit, "sounds": label,
-                     "start_s": round(u.start_s, 2), "end_s": round(u.end_s, 2), "gop": round(u.llr, 1)})
+                     "start_s": round(u.start_s, 2), "end_s": round(u.end_s, 2), "gop": round(u.llr, 1),
+                     "heard": u.heard})
     return rows
 
 
@@ -358,6 +359,7 @@ def api_score(body: dict) -> dict:
     outcome, items = assess_task(
         level, [(text, transcript)], language=language, acoustic=[evidence] if evidence else None,
         gop_threshold=float(gop_threshold) if evidence and gop_threshold is not None else None,
+        audio_decides=bool(body.get("audio_decides", True)),
     )
     item = items[0]
     phoneme_units = em is not None and is_phoneme_model(em.vocab)

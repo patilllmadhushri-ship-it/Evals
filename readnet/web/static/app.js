@@ -287,7 +287,7 @@ function soundsView(result) {
       <td>${op.start_s.toFixed(2)}–${op.end_s.toFixed(2)}s</td>
       <td class="deva">/${esc(op.units.map((u) => u.sounds).filter(Boolean).join(" "))}/</td>
       <td><div class="units">${op.units.filter((u) => u.sounds).map((u) => `<span class="unit${u.gop < threshold ? " low" : ""}">
-          <b>/${esc(u.sounds)}/</b>${u.letter ? `<small class="deva">${esc(u.letter)}</small>` : ""}<small>${u.start_s.toFixed(2)}–${u.end_s.toFixed(2)}s</small><small>GOP ${u.gop > 0 ? "+" : ""}${u.gop}</small></span>`).join("")}</div></td>
+          <b>/${esc(u.sounds)}/</b>${u.letter ? `<small class="deva">${esc(u.letter)}</small>` : ""}<small>${u.start_s.toFixed(2)}–${u.end_s.toFixed(2)}s</small><small>GOP ${u.gop > 0 ? "+" : ""}${u.gop}</small>${u.gop < threshold ? `<small class="deva">audio: ${u.heard ? esc(u.heard) : "nothing"}</small>` : ""}</span>`).join("")}</div></td>
     </tr>`).join("");
   return `<details class="sounds" open><summary>Sounds: forced alignment and GOP per phoneme</summary><div class="inner">
     <p class="gop-line">Each word is turned into its sounds (G2P), the recording is cut into 20 ms frames, forced alignment finds which frames carry each sound, and each sound gets a GOP: how much better the expected sound fits its frames than the strongest other sound. Red is below the threshold. With the Hindi model, an unwritten /ə/ shares its consonant's frames and score (shown together, e.g. /ɡʰ ə/).</p>
@@ -320,7 +320,7 @@ async function score(level, text, recorder, target) {
     const result = await api("/api/score", {
       language: state.language, level, text, engine: currentEngine(),
       typed: recorder.typed, audio_b64: recorder.audio?.b64, filename: recorder.audio?.filename,
-      model_id: $("model-id").value, gop_threshold: Number($("gop").value), gop: $("gop-on").checked,
+      model_id: $("model-id").value, gop_threshold: Number($("gop").value), gop: $("gop-on").checked, audio_decides: $("audio-decides").checked,
     });
     target.innerHTML = resultCard(result, engineLabel());
     return result;
