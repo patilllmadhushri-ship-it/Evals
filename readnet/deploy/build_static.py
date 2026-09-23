@@ -30,7 +30,7 @@ colorTo: gray
 sdk: static
 app_file: index.html
 pinned: false
-short_description: Record a child reading Hindi, get the ASER level and mistakes
+short_description: Hindi reading level and mistakes from a recording
 ---
 
 # ReadNet
