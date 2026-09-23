@@ -84,11 +84,30 @@ class Recorder {
     this.container.querySelector("input[type=file]").addEventListener("change", (e) => this.upload(e.target.files[0]));
   }
 
+  micProblem(message) {
+    let box = this.container.querySelector(".mic-error");
+    if (!box) {
+      box = Object.assign(document.createElement("div"), { className: "error mic-error" });
+      this.container.appendChild(box);
+    }
+    box.innerHTML = `${esc(message)} You can still use <b>Upload a recording</b>.`;
+  }
+
   async start() {
+    this.container.querySelector(".mic-error")?.remove();
+    if (!window.isSecureContext || !navigator.mediaDevices?.getUserMedia) {
+      this.micProblem(`This browser only allows the microphone on a secure page. Open http://localhost:${location.port || 8600} in Chrome or Edge (use "localhost", not an IP address).`);
+      return;
+    }
     try {
       this.stream = await navigator.mediaDevices.getUserMedia({ audio: true });
     } catch (err) {
-      this.container.querySelector(".file-status").textContent = "Microphone not available. Upload a recording instead.";
+      const reasons = {
+        NotAllowedError: "Microphone permission is blocked. Click the icon at the left of the address bar, set Microphone to Allow, and try again. The preview pane inside the Claude app always blocks the microphone, so open this page in Chrome or Edge.",
+        NotFoundError: "No microphone was found. Plug one in, or check Windows Settings > Privacy > Microphone.",
+        NotReadableError: "The microphone is in use by another app, or Windows is blocking it (Settings > Privacy > Microphone > let desktop apps use it).",
+      };
+      this.micProblem(reasons[err.name] || `Could not start the microphone: ${err.message || err.name}.`);
       return;
     }
     this.ctx = new AudioContext();
