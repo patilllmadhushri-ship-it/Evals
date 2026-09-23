@@ -19,13 +19,6 @@ from readnet.web.server import make_server
 
 
 def start():
-    import tempfile
-    from pathlib import Path
-
-    from readnet.web import server as web
-    from readnet.web.records import Records
-
-    web.RECORDS = Records(Path(tempfile.mkdtemp()) / "test.db")  # never the teacher's real records
     server = make_server("127.0.0.1", 0)
     threading.Thread(target=server.serve_forever, daemon=True).start()
     return server, f"http://127.0.0.1:{server.server_address[1]}"
@@ -92,28 +85,13 @@ def test_web() -> None:
         missing = post(base, "/api/score", {"language": "hi", "level": "WORD", "engine": "sarvam", "text": "घर"})
         assert missing["status"] in (400, 502) and missing["error"], missing
 
-        # Student records: the sounds a child keeps missing, across readings.
-        student = post(base, "/api/students", {"name": "Asha", "grade": "3", "language": "hi"})
-        sid = student["id"]
-        assert post(base, "/api/students", {"name": " "})["status"] == 400
-        text = "मेरा घर बड़ा है"
-        for heard in ("मेरा गर बड़ा है", "मेरा गर बड़ा है", "मेरा घर बड़ा है"):
-            result = post(base, "/api/score", {"language": "hi", "level": "PARAGRAPH", "engine": "typed",
-                                               "text": text, "typed": heard})
-            saved = post(base, "/api/attempts", {"student_id": sid, "language": "hi", "task": "PARAGRAPH",
-                                                 "text": text, "result": result, "engine": "typed"})
-            assert saved["sounds_saved"] > 0, saved
-        post(base, "/api/sessions", {"student_id": sid, "language": "hi", "placement": final["placement"]})
-        _, raw = get(base, f"/api/students/{sid}")
-        detail = json.loads(raw)
-        gha = next(s for s in detail["sounds"] if s["letter"] == "घ")
-        assert (gha["tries"], gha["wrong"], gha["recent"], gha["last_ok"]) == (3, 2, "001", True), gha
-        assert detail["words"][0]["word"] == "घर" and detail["sessions"][0]["level"] == "Letter"
-        roster = json.loads(get(base, "/api/students")[1])["students"]
-        assert roster[0]["practise"] == ["घ"] and roster[0]["readings"] == 3
-        status, csv_text = get(base, f"/api/students/{sid}/export.csv")
-        assert status == 200 and "घर" in csv_text and csv_text.count("\n") > 30
-        assert post(base, "/api/attempts", {"student_id": 999, "language": "hi", "result": result})["status"] == 400
+        # Each result says which letters the child got wrong, and nothing is stored.
+        misread = post(base, "/api/score", {"language": "hi", "level": "PARAGRAPH", "engine": "typed",
+                                            "text": "मेरा घर बड़ा है", "typed": "मेरा गर बड़ा है"})
+        assert [(w["letter"], w["word"]) for w in misread["wrong_letters"]] == [("घ", "घर")], misread["wrong_letters"]
+        forgiven = post(base, "/api/score", {"language": "hi", "level": "WORD", "engine": "typed",
+                                             "text": "गाँव", "typed": "गाव"})
+        assert forgiven["wrong_letters"] == []  # HI-20: not held against the child
     finally:
         server.shutdown()
 
