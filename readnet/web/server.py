@@ -24,6 +24,7 @@ import importlib.util
 import json
 import mimetypes
 import time
+from collections import Counter
 from datetime import datetime
 from functools import lru_cache
 from http import HTTPStatus
@@ -38,7 +39,8 @@ from stt_eval.providers import ProviderError
 from .. import languages
 from ..acoustic import DEFAULT_MODELS
 from ..aser import Level, TaskOutcome, next_task, place
-from ..pipeline import assess_task
+from ..confusion import hand_made_confusions
+from ..pipeline import assess_task, is_letter_text
 from .content import CONTENT, NEXT_STEPS, TASKS
 
 STATIC = Path(__file__).with_name("static")
@@ -150,7 +152,7 @@ def gop_evidence(wav_bytes: bytes, canonical: str, language: str, model_id: str)
 
 def transcribe(engine: str, audio: bytes | None, filename: str, canonical: str, language: str,
                model_id: str, with_gop: bool):
-    """Returns (transcript, seconds, acoustic evidence or None, notes).
+    """Returns (transcript, seconds, acoustic evidence or None, notes, emissions or None).
 
     GOP runs on every engine that has audio when `with_gop` is set: the chosen
     engine writes the transcript, and the local model scores each expected
@@ -164,7 +166,7 @@ def transcribe(engine: str, audio: bytes | None, filename: str, canonical: str, 
         text = mock.transcribe(audio or canonical.encode("utf-8"), LOCALES[language]).text
         if with_gop:
             notes.append("GOP needs a real recording; Mock has none.")
-        return text, time.perf_counter() - started, None, notes
+        return text, time.perf_counter() - started, None, notes, None
     if not audio:
         raise ApiError("Record or upload the child's reading first.")
 
@@ -187,7 +189,7 @@ def transcribe(engine: str, audio: bytes | None, filename: str, canonical: str, 
     if engine == LOCAL:
         from ..acoustic import greedy_decode
 
-        return greedy_decode(em), time.perf_counter() - started, evidence, notes
+        return greedy_decode(em), time.perf_counter() - started, evidence, notes, em
 
     if engine not in providers.PROVIDER_CLASSES or not env.provider_key(engine):
         raise ApiError(f"No key configured for {engine}.")
@@ -199,7 +201,7 @@ def transcribe(engine: str, audio: bytes | None, filename: str, canonical: str, 
     text = " ".join(provider.transcribe(piece, LOCALES[language]).text for piece in pieces)
     if not text.strip():
         notes.append("The engine returned no words. Check the recording has speech in it.")
-    return text, time.perf_counter() - started, evidence, notes
+    return text, time.perf_counter() - started, evidence, notes, em
 
 
 def model_error(model_id: str, error: Exception) -> str:
@@ -256,17 +258,40 @@ def api_score(body: dict) -> dict:
     with_gop = bool(body.get("gop", True))
     notes: list[str] = []
 
+    em = None
     if engine == TYPED:
         transcript, seconds, evidence = str(body.get("typed") or ""), 0.0, None
     else:
         audio = base64.b64decode(body["audio_b64"]) if body.get("audio_b64") else None
         try:
-            transcript, seconds, evidence, notes = transcribe(
+            transcript, seconds, evidence, notes, em = transcribe(
                 engine, audio, str(body.get("filename") or ""), text, language, str(body.get("model_id") or ""),
                 with_gop,
             )
         except (ProviderError, stt_audio.AudioError, OSError, ImportError, ValueError) as error:
             raise ApiError(f"Could not transcribe: {error}", HTTPStatus.BAD_GATEWAY) from error
+
+    # Letters: an open engine cannot hear aspiration in a half-second clip
+    # (it wrote का का गा गा for क ख ग घ). When the audio model is loaded, each
+    # letter is decided by a closed-set check instead: the expected letter
+    # against its known confusions only. The engine's text is kept to compare.
+    profile = languages.get(language)
+    letters = profile.normalize(text)[0].split()
+    letter_check = None
+    engine_transcript = transcript
+    if em is not None and is_letter_text(" ".join(letters)):
+        from ..acoustic import letter_decisions
+
+        try:
+            decisions = letter_decisions(em.log_probs, letters, lambda l: hand_made_confusions(l, profile.tables),
+                                         em.vocab, em.blank, em.word_delimiter)
+            letter_check = [{"letter": d.expected, "heard": d.best, "margin": round(d.margin, 1),
+                             "candidates": sorted(d.scores, key=d.scores.get, reverse=True)} for d in decisions]
+            transcript = " ".join(d.best for d in decisions)
+            notes.append("Letters were judged by the acoustic letter check (each letter against the letters it "
+                         "is usually confused with); the engine's own transcript is shown for comparison.")
+        except ValueError as error:
+            notes.append(f"Letter check skipped: {error}")
 
     outcome, items = assess_task(
         level, [(text, transcript)], language=language, acoustic=[evidence] if evidence else None,
@@ -281,9 +306,40 @@ def api_score(body: dict) -> dict:
             w = evidence.words[op.ref_index]
             entry.update(start_s=w.start_s, end_s=w.end_s, gop=w.llr)
         ops.append(entry)
+
+    kinds = Counter(op["kind"] for op in ops)
+    gop_scored = [op for op in ops if op.get("gop") is not None]
+    if evidence is not None:
+        gop_detail = (f"Ran on {len(gop_scored)} words with {body.get('model_id') or DEFAULT_MODELS[language]}. "
+                      f"{sum(1 for op in gop_scored if op['gop'] < float(gop_threshold or 0))} below the threshold.")
+    elif engine == TYPED:
+        gop_detail = "Not run: typed transcripts have no audio."
+    elif not with_gop:
+        gop_detail = "Off (turned off in Setup)."
+    else:
+        gop_detail = next((n for n in notes if n.startswith("GOP")), "Not run.")
+    pipeline = [
+        {"stage": "Speech to text", "detail": f"{engine}: {engine_transcript or '(nothing heard)'}"},
+        {"stage": "Normalise the text on screen", "rules": item.canonical_trace.steps,
+         "result": item.canonical_normalized},
+        {"stage": "Normalise the text heard", "rules": item.transcript_trace.steps,
+         "result": item.transcript_normalized},
+        {"stage": "Align word by word", "detail": f"{kinds['match']} matched, {kinds['substitution']} substituted, "
+                                                 f"{kinds['deletion']} not read, {kinds['insertion']} extra"},
+        {"stage": "Forgiveness rules", "detail": ", ".join(f"{r} ×{n}" for r, n in item.result.rules_applied.items())
+                                                  or "None applied."},
+        {"stage": "Pronunciation (GOP)", "detail": gop_detail},
+    ]
+    if letter_check is not None:
+        pipeline.append({"stage": "Letter check", "detail": ", ".join(
+            f"{c['letter']}→{c['heard']}" for c in letter_check)})
+    pipeline.append({"stage": "Verdict", "detail": "; ".join(outcome.reasons)})
+
     return {
         "outcome": _outcome_dict(outcome),
         "transcript": transcript,
+        "engine_transcript": engine_transcript,
+        "letter_check": letter_check,
         "seconds": round(seconds, 2),
         "canonical_normalized": item.canonical_normalized,
         "transcript_normalized": item.transcript_normalized,
@@ -291,6 +347,7 @@ def api_score(body: dict) -> dict:
         "acoustic_doubts": item.acoustic_doubts,
         "gop_ran": evidence is not None,
         "notes": notes,
+        "pipeline": pipeline,
         "mistake_profile": dict(item.result.mistake_profile),
         "ops": ops,
     }

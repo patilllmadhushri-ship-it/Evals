@@ -21,6 +21,12 @@ from .languages import Trace
 from .score import ScoreResult, score
 
 
+def is_letter_text(normalized: str) -> bool:
+    """Single letters (क ख ग), whatever task type they were entered under."""
+    tokens = normalized.split()
+    return bool(tokens) and all(len(t) == 1 for t in tokens)
+
+
 @dataclass
 class ItemAssessment:
     canonical: str
@@ -75,7 +81,7 @@ def assess_item(
         canon_norm.split(),
         hyp_norm.split(),
         profile,
-        letter_task=level == Level.LETTER,
+        letter_task=level == Level.LETTER or is_letter_text(canon_norm),
         count_insertions=rules.count_insertions,
         romanised=hyp_trace.romanised_words,
     )

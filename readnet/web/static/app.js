@@ -227,9 +227,6 @@ function resultCard(result, engineLabel) {
   const pace = o.wpm != null ? `<p class="reasons">Pace: ${Math.round(o.wpm)} words per minute${o.longest_pause != null ? `, longest pause ${o.longest_pause.toFixed(1)}s` : ""} (measured, not enforced)</p>` : "";
   const doubts = result.acoustic_doubts.length
     ? `<div class="warning">The audio does not sound like: <span class="deva">${esc(result.acoustic_doubts.join(", "))}</span>. The transcript says correct, so these are flagged for review, not counted.</div>` : "";
-  const changes = result.changes.length
-    ? `<div class="table-wrap"><table><tr><th>Rule</th><th>Before</th><th>After</th></tr>${result.changes.map((c) => `<tr><td>${esc(c.rule)}</td><td class="deva">${esc(c.before)}</td><td class="deva">${esc(c.after)}</td></tr>`).join("")}</table></div>`
-    : "<p class='muted'>No rule changed the heard text.</p>";
   return `<div class="card">
     <div class="stats">
       <div class="stat"><div class="stat-label">Verdict</div><div class="stat-value ${o.passed ? "pass" : "fail"}">${o.passed ? "Pass" : "Not yet"}</div></div>
@@ -238,18 +235,46 @@ function resultCard(result, engineLabel) {
       <div class="stat"><div class="stat-label">Engine time</div><div class="stat-value">${result.seconds.toFixed(1)}s</div></div>
     </div>
     <p class="reasons">${esc(o.reasons.join(" · "))}</p>
-    <p class="heard"><b>Heard</b> (${esc(engineLabel)}): <span>${esc(result.transcript) || "nothing"}</span></p>
+    <p class="heard"><b>Heard</b> (${esc(engineLabel)}): <span>${esc(result.engine_transcript ?? result.transcript) || "nothing"}</span></p>
+    ${letterCheck(result)}
     ${result.notes?.length ? `<div class="notes">${result.notes.map(esc).join("<br>")}</div>` : ""}
     ${pace}${doubts}${LEGEND}
     <div class="words">${wordChips(result)}</div>
     ${gopLine(result)}
-    <details><summary>Show the working</summary><div class="inner">
-      <p><b>Text after normalisation:</b> <span class="deva">${esc(result.canonical_normalized)}</span></p>
-      <p><b>Heard after normalisation:</b> <span class="deva">${esc(result.transcript_normalized)}</span></p>
-      ${changes}
-    </div></details>
+    ${pipelineView(result)}
     <div class="result-extra"></div>
   </div>`;
+}
+
+function letterCheck(result) {
+  if (!result.letter_check) return "";
+  const rows = result.letter_check.map((c) => `<tr>
+      <td class="deva">${esc(c.letter)}</td>
+      <td class="deva"><b>${esc(c.heard)}</b></td>
+      <td>${c.heard === c.letter ? "right" : "wrong"}</td>
+      <td>${c.margin > 0 ? "+" : ""}${c.margin}</td>
+      <td class="deva">${esc(c.candidates.join(" "))}</td></tr>`).join("");
+  return `<h3 class="section-title">Letter check (the audio, letter by letter)</h3>
+    <div class="table-wrap"><table>
+      <tr><th>Shown</th><th>Sounded like</th><th>Result</th><th>Margin</th><th>Letters compared, best first</th></tr>${rows}
+    </table></div>
+    <p class="gop-line">Margin: how much better the shown letter fits than its closest rival. Negative means a rival fits better.</p>`;
+}
+
+function pipelineView(result) {
+  if (!result.pipeline) return "";
+  const steps = result.pipeline.map((step) => {
+    let body = step.detail ? `<span class="deva">${esc(step.detail)}</span>` : "";
+    if (step.rules) {
+      body = step.rules.length
+        ? step.rules.map(([rule, before, after]) => `<div class="rule-row"><span class="rule-id">${esc(rule)}</span>
+            <span class="deva">${esc(before)}</span> <span class="arrow">to</span> <span class="deva">${esc(after)}</span></div>`).join("")
+        : "<span class='muted-inline'>No rule changed it.</span>";
+      body += `<div class="rule-result">Result: <span class="deva">${esc(step.result)}</span></div>`;
+    }
+    return `<li><div class="stage">${esc(step.stage)}</div><div class="stage-body">${body}</div></li>`;
+  }).join("");
+  return `<h3 class="section-title">How this was scored</h3><ol class="pipeline">${steps}</ol>`;
 }
 
 function gopLine(result) {
