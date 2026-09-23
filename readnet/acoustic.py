@@ -266,6 +266,27 @@ class Emissions:
     word_delimiter: str | None = "|"
 
 
+def greedy_decode(emissions: Emissions) -> str:
+    """Best-per-frame CTC decoding: the model's own open transcript.
+
+    Lets a local CTC model act as the ASR engine as well as the GOP scorer, so
+    one recording gives both a transcript and word timings.
+    """
+    ids = np.argmax(emissions.log_probs, axis=1)
+    by_id = {i: tok for tok, i in emissions.vocab.items()}
+    out: list[str] = []
+    previous = None
+    for i in ids:
+        if i != previous and i != emissions.blank:
+            token = by_id.get(int(i), "")
+            if token == emissions.word_delimiter:
+                out.append(" ")
+            elif not (token.startswith("<") and token.endswith(">")):
+                out.append(token)
+        previous = i
+    return " ".join("".join(out).split())
+
+
 class EmissionModel(Protocol):
     def emissions(self, wav_bytes: bytes) -> Emissions: ...
 

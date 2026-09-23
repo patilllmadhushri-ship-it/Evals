@@ -6,6 +6,23 @@ also gives the child's mistake profile. It implements the ReadNet / PadhAI
 blueprint and the "Turning speech into a reading score" approach, for Hindi
 and Marathi, with a template for the next languages.
 
+## Try it: the test bench app
+
+```bash
+py -m streamlit run readnet_app.py
+```
+
+Pick a language and a speech engine in the sidebar: Sarvam, Google, Deepgram
+or ElevenLabs (keys from `.env`), a local wav2vec2 model, Mock, or "type what
+the child said". The child then reads each task aloud. The app transcribes,
+colours every word (read right / forgiven, with the rule id / mistake / extra
+sound), and walks the ASER order to a level. Each task's verdict can be
+disputed; disputes go to `.stt_eval_runs/readnet_disputes.csv` as candidate
+field cases. Audio is never stored. `py readnet_ui_test.py` walks a full
+session headlessly.
+
+## Command line
+
 ```bash
 py -m readnet.tests.test_cases
 ```
