@@ -43,6 +43,7 @@ from ..aser import Level, TaskOutcome, next_task, place
 from ..confusion import hand_made_confusions
 from ..pipeline import assess_task, is_letter_text
 from .content import CONTENT, NEXT_STEPS, TASKS
+from .records import Records
 
 STATIC = Path(__file__).with_name("static")
 DISPUTE_LOG = Path(".stt_eval_runs") / "readnet_disputes.csv"
@@ -454,6 +455,62 @@ def api_dispute(body: dict) -> dict:
     return {"saved": str(DISPUTE_LOG)}
 
 
+# -- student records --------------------------------------------------------------------
+
+RECORDS: Records | None = None
+
+
+def records() -> Records:
+    global RECORDS
+    if RECORDS is None:
+        RECORDS = Records()
+    return RECORDS
+
+
+def _student_id(value) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError) as error:
+        raise ApiError("Choose a student first.") from error
+
+
+def api_students_add(body: dict) -> dict:
+    try:
+        return records().add_student(str(body.get("name") or ""), str(body.get("grade") or ""),
+                                     _language(body.get("language")))
+    except ValueError as error:
+        raise ApiError(str(error)) from error
+
+
+def api_attempt(body: dict) -> dict:
+    try:
+        return records().save_attempt(
+            _student_id(body.get("student_id")), language=_language(body.get("language")),
+            task=str(body.get("task") or ""), text=str(body.get("text") or ""), result=body["result"],
+            engine=str(body.get("engine") or ""), threshold=float(body.get("threshold", -1)))
+    except KeyError as error:
+        raise ApiError("Unknown student.") from error
+
+
+def api_session(body: dict) -> dict:
+    placement = body.get("placement") or {}
+    try:
+        sid = records().save_session(
+            _student_id(body.get("student_id")), language=_language(body.get("language")),
+            level=str(placement.get("label", "")), level_index=int(Level[placement.get("level", "BEGINNER")]),
+            path=list(placement.get("path", [])))
+    except KeyError as error:
+        raise ApiError("Unknown student.") from error
+    return {"session_id": sid}
+
+
+def api_student(sid: int) -> dict:
+    try:
+        return records().detail(sid)
+    except KeyError as error:
+        raise ApiError("Unknown student.", HTTPStatus.NOT_FOUND) from error
+
+
 # -- HTTP -----------------------------------------------------------------------------
 
 
@@ -479,6 +536,24 @@ class Handler(BaseHTTPRequestHandler):
         url = urlparse(self.path)
         if url.path == "/api/config":
             return self._handle(lambda: api_config(parse_qs(url.query)))
+        if url.path == "/api/students":
+            return self._handle(lambda: {"students": records().students()})
+        parts = url.path.strip("/").split("/")
+        if len(parts) >= 3 and parts[:2] == ["api", "students"] and parts[2].isdigit():
+            sid = int(parts[2])
+            if len(parts) == 4 and parts[3] == "export.csv":
+                try:
+                    body = records().export_csv(sid).encode("utf-8-sig")  # BOM: Excel opens Devanagari right
+                except KeyError:
+                    return self._send(HTTPStatus.NOT_FOUND, b"Unknown student", "text/plain")
+                self.send_response(HTTPStatus.OK)
+                self.send_header("Content-Type", "text/csv; charset=utf-8")
+                self.send_header("Content-Disposition", f'attachment; filename="student_{sid}_sounds.csv"')
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+                return None
+            return self._handle(lambda: api_student(sid))
         name = "index.html" if url.path in ("/", "") else url.path.lstrip("/")
         file = (STATIC / name).resolve()
         if STATIC.resolve() not in file.parents or not file.is_file():
@@ -489,7 +564,8 @@ class Handler(BaseHTTPRequestHandler):
         self._send(HTTPStatus.OK, file.read_bytes(), kind)
 
     def do_POST(self):
-        routes = {"/api/score": api_score, "/api/next": api_next, "/api/dispute": api_dispute}
+        routes = {"/api/score": api_score, "/api/next": api_next, "/api/dispute": api_dispute,
+                  "/api/students": api_students_add, "/api/attempts": api_attempt, "/api/sessions": api_session}
         handler = routes.get(urlparse(self.path).path)
         if handler is None:
             return self._json(HTTPStatus.NOT_FOUND, {"error": "Unknown endpoint"})
@@ -518,7 +594,11 @@ def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(prog="readnet.web")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8600)
+    parser.add_argument("--db", help="student records database (default .stt_eval_runs/readnet.db)")
     args = parser.parse_args(argv)
+    if args.db:
+        global RECORDS
+        RECORDS = Records(args.db)
     server = make_server(args.host, args.port)
     print(f"ReadNet test bench on http://{args.host}:{args.port}")
     try:
