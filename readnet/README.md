@@ -48,6 +48,25 @@ sent in parts. Each verdict can be disputed; disputes go to
 `.stt_eval_runs/readnet_disputes.csv` as candidate field cases. Audio is never
 stored. `py -m readnet.tests.test_web` runs a full session over the API.
 
+## Share a public link (free, from this computer)
+
+Two PowerShell windows, both in the `stt` folder:
+
+```bash
+py -m readnet.web --public --port 8700
+```
+
+```bash
+& "C:\Program Files (x86)\cloudflared\cloudflared.exe" tunnel --url http://localhost:8700
+```
+
+The second prints an `https://….trycloudflare.com` link: anyone can open it,
+record and get results. `--public` ignores `.env` and every API key, so the
+link can never spend provider credits; transcription and GOP run on the local
+model. The link works while both windows stay open and the computer is awake,
+and it changes each time the tunnel restarts. For a permanent link,
+`readnet/deploy/` builds a Hugging Face Space (Docker Spaces need a PRO plan).
+
 ## What the child got wrong
 
 Every result lists the letters the child got wrong: the letter, its sound,

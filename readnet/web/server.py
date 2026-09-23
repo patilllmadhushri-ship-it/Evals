@@ -523,7 +523,8 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def make_server(host: str = "127.0.0.1", port: int = 8600) -> ThreadingHTTPServer:
-    env.load()
+    if not PUBLIC:
+        env.load()  # a public demo never reads .env: its keys would be spendable by anyone with the link
     return ThreadingHTTPServer((host, port), Handler)
 
 
@@ -531,7 +532,14 @@ def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(prog="readnet.web")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8600)
+    parser.add_argument("--public", action="store_true",
+                        help="public demo: ignore .env and any API keys, use only the local model")
     args = parser.parse_args(argv)
+    if args.public:
+        global PUBLIC
+        PUBLIC = True
+        for variable in env.PROVIDER_ENV_VARS.values():
+            os.environ.pop(variable, None)
     server = make_server(args.host, args.port)
     print(f"ReadNet test bench on http://{args.host}:{args.port}")
     try:
