@@ -134,7 +134,7 @@ the audio itself.
 than the strongest alternative, at that sound's strongest frame. "Nothing was
 said here" (silence) counts as an alternative, so a *left-out* sound scores
 negative. Positive means said; negative means something else was said, or
-nothing. The threshold is **0**.
+nothing. The default threshold is **−2**, adjustable in Setup.
 
 ### The audio can correct the transcript
 When a sound scores below the threshold, the word is **rebuilt from what the

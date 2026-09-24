@@ -49,7 +49,7 @@ def score(body_json: str, log_probs=None, frames: int = 0, vocab_size: int = 0,
     text = str(body.get("text") or "")
     threshold = body.get("gop_threshold")
     common = dict(language=LANGUAGE, level=level, text=text,
-                  gop_threshold=float(threshold) if threshold is not None else 0.0,
+                  gop_threshold=float(threshold) if threshold is not None else -2.0,
                   audio_decides=bool(body.get("audio_decides", True)))
     if body.get("engine") == "typed" or log_probs is None:
         return _dump(core.score_reading(transcript=str(body.get("typed") or ""), engine="typed", typed=True, **common))
