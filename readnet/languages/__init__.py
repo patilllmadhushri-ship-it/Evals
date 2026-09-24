@@ -162,5 +162,5 @@ def supported() -> list[str]:
 def get(code: str) -> LanguageProfile:
     key = _ALIASES.get(code.lower(), code.lower())
     if key not in _LOADERS:
-        raise KeyError(f"No ReadNet language module for {code!r}; have {supported()}")
+        raise KeyError(f"No Akshar language module for {code!r}; have {supported()}")
     return _LOADERS[key]()

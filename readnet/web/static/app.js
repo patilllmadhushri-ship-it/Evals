@@ -1,4 +1,4 @@
-// ReadNet test bench. Plain JavaScript, no framework.
+// Akshar test bench. Plain JavaScript, no framework.
 // Records the child as 16-bit PCM WAV in the browser, sends it to /api/score,
 // and walks the ASER order with /api/next.
 

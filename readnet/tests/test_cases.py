@@ -1,4 +1,4 @@
-"""ReadNet regression suite.
+"""Akshar regression suite.
 
     py -m readnet.tests.test_cases
 

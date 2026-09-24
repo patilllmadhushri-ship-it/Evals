@@ -1,4 +1,4 @@
-# ReadNet — Loom script (starts with letters)
+# Akshar — Loom script (starts with letters)
 
 About 7–8 minutes. Read the **SAY** lines roughly as written; **SHOW**
 tells you what to click. Practice once before recording — you don't need to
@@ -11,7 +11,7 @@ memorise it, just know the order.
 **SHOW:** the app open, Setup panel visible, nothing scored yet.
 
 **SAY:**
-> "This is ReadNet. It listens to a child reading Hindi or Marathi aloud and
+> "This is Akshar. It listens to a child reading Hindi or Marathi aloud and
 > tells the teacher two things: their ASER reading level, and exactly which
 > letters and sounds they got wrong. I'll start with the hardest case —
 > single letters — because that's where speech recognition normally falls
@@ -174,7 +174,7 @@ through to a final level.
 
 **SAY:**
 > "So: real speech engines can't judge reading on their own — they
-> transcribe, they don't grade. ReadNet adds the layer that does: a rulebook
+> transcribe, they don't grade. Akshar adds the layer that does: a rulebook
 > that says what actually counts as a mistake, and an audio check that
 > catches what the transcript hides. Happy to go deeper into any part of
 > this — the rules, the scoring code, or the pronunciation model."

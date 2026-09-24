@@ -1,6 +1,6 @@
-# ReadNet: how it works
+# Akshar: how it works
 
-ReadNet listens to a child reading Hindi or Marathi aloud and tells the teacher
+Akshar listens to a child reading Hindi or Marathi aloud and tells the teacher
 two things:
 
 1. **The child's reading level** on Pratham's ASER ladder:

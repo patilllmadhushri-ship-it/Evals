@@ -1,5 +1,5 @@
 ---
-title: ReadNet
+title: Akshar
 colorFrom: blue
 colorTo: gray
 sdk: docker
@@ -8,7 +8,7 @@ pinned: false
 short_description: Record a child reading Hindi or Marathi, get the ASER level
 ---
 
-# ReadNet
+# Akshar
 
 Record a child reading aloud in Hindi or Marathi and get their ASER reading
 level (Beginner, Letter, Word, Paragraph, Story), every word marked right or

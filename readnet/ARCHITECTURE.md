@@ -1,6 +1,6 @@
-# ReadNet: architecture and system design
+# Akshar: architecture and system design
 
-ReadNet turns a child's reading aloud into an ASER reading level and a list
+Akshar turns a child's reading aloud into an ASER reading level and a list
 of the exact letters and sounds they got wrong. This document describes how
 the system is built. For the user-facing flow, see
 [HOW_IT_WORKS.md](HOW_IT_WORKS.md).
@@ -12,7 +12,7 @@ the system is built. For the user-facing flow, see
 | Goal / constraint | What it means for the design |
 |---|---|
 | **Never fail a child who read correctly** | Every "mistake" must survive normalisation and the rulebook. Uncertain evidence (low GOP) is flagged, not counted, unless a rule says so. |
-| **Judge reading, not transcription** | A speech engine only writes text. Scoring, rules and pronunciation checks are ReadNet's own layers. |
+| **Judge reading, not transcription** | A speech engine only writes text. Scoring, rules and pronunciation checks are Akshar's own layers. |
 | **Explainable verdicts** | Every forgiven difference cites a rule id; every result shows each pipeline stage. |
 | **Many languages, few experts** | One language-independent scorer; each language is a pluggable rulebook plus data. |
 | **Offline, low-cost devices (PadhAI)** | The scoring core is plain Python + numpy; the model runs from a portable ONNX file. |
@@ -78,7 +78,7 @@ verified on the same recordings.
 - **Keys** come from `.env`. `--public` mode ignores `.env` entirely, so a shared link can never spend credits.
 
 ### 3.3 Acoustic model (`readnet/acoustic.py`)
-- **Model:** Vakyansh wav2vec2 (base, CTC, ~4,200 h of Hindi, MIT licence). It is an ASR model; ReadNet uses its *per-frame probabilities*, not just its text.
+- **Model:** Vakyansh wav2vec2 (base, CTC, ~4,200 h of Hindi, MIT licence). It is an ASR model; Akshar uses its *per-frame probabilities*, not just its text.
 - **Adapters:** `Wav2Vec2Emissions` (torch, server) and ONNX via onnxruntime-web (browser).
 - **Blank detection:** the model's real CTC blank is detected from its output. The fairseq-converted checkpoints ship a config naming the wrong one.
 

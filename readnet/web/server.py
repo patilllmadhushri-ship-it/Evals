@@ -1,4 +1,4 @@
-"""ReadNet test bench: a plain HTTP server and one page. No web framework.
+"""Akshar test bench: a plain HTTP server and one page. No web framework.
 
     py -m readnet.web                 # http://127.0.0.1:8600
     py -m readnet.web --port 8502
@@ -294,7 +294,7 @@ def api_dispute(body: dict) -> dict:
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "ReadNet"
+    server_version = "Akshar"
 
     def log_message(self, fmt, *args):  # quieter: method and path only
         print(f"{self.command} {self.path.split('?')[0]} {args[1] if len(args) > 1 else ''}")
@@ -364,7 +364,7 @@ def main(argv: list[str] | None = None) -> None:
         for variable in env.PROVIDER_ENV_VARS.values():
             os.environ.pop(variable, None)
     server = make_server(args.host, args.port)
-    print(f"ReadNet test bench on http://{args.host}:{args.port}")
+    print(f"Akshar test bench on http://{args.host}:{args.port}")
     try:
         server.serve_forever()
     except KeyboardInterrupt:

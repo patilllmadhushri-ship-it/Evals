@@ -1,4 +1,4 @@
-// ReadNet with no server: everything runs in this browser tab.
+// Akshar with no server: everything runs in this browser tab.
 //
 // The page (app.js) talks to /api/... exactly as it does with the local
 // server. This file answers those calls itself:

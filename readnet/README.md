@@ -1,8 +1,8 @@
-# ReadNet
+# Akshar
 
-ReadNet takes the text on the screen and what a child read aloud, and returns
+Akshar takes the text on the screen and what a child read aloud, and returns
 the child's ASER level: **Beginner → Letter → Word → Paragraph → Story**. It
-also gives the child's mistake profile. It implements the ReadNet / PadhAI
+also gives the child's mistake profile. It implements the Akshar / PadhAI
 blueprint and the "Turning speech into a reading score" approach, for Hindi
 and Marathi, with a template for the next languages.
 

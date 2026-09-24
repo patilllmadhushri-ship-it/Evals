@@ -1,4 +1,4 @@
-"""Assemble the free online version: a static site that runs ReadNet in the browser.
+"""Assemble the free online version: a static site that runs Akshar in the browser.
 
     py readnet/deploy/build_static.py <out_dir>                 # for the Hugging Face static Space
     py readnet/deploy/build_static.py <out_dir> --local <onnx>   # to test on this computer
@@ -24,7 +24,7 @@ SKIP = {("readnet", "web", "server.py")}
 SKIP_DIRS = {"deploy", "tests", "__pycache__", "_template"}
 
 SPACE_README = """---
-title: ReadNet
+title: Akshar
 colorFrom: blue
 colorTo: gray
 sdk: static
@@ -33,7 +33,7 @@ pinned: false
 short_description: Hindi reading level and mistakes from a recording
 ---
 
-# ReadNet
+# Akshar
 
 Record a child reading Hindi aloud and get their ASER reading level, every
 word marked right or wrong, and the letters and sounds they got wrong.
