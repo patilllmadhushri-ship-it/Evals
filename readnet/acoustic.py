@@ -121,19 +121,32 @@ def gop(log_probs: np.ndarray, spans: Sequence[TokenSpan], targets: Sequence[int
     judged present when, at its strongest frame, it beats everything —
     blank included. CTC outputs are peaky (a token usually owns one or two
     frames), so the strongest frame is taken rather than the span average.
+
+    Forced alignment gives each token only the minimum frames needed to keep
+    the whole sequence monotonic — in fast, connected speech that can be a
+    single frame, and the token's real acoustic peak can fall just outside
+    it. The peak search widens out to the midpoint with each neighbour (the
+    same widening `letter_decisions` uses), so a real peak just past a tight
+    boundary is not missed and mistaken for "nothing said". The tight span
+    is still what is reported and averaged for the mean-log-posterior score,
+    so timestamps and that figure stay exact.
     """
     log_probs = np.asarray(log_probs, dtype=np.float64)
+    T = log_probs.shape[0]
     out: list[TokenGop] = []
-    for span in spans:
+    for i, span in enumerate(spans):
         target = targets[span.token_index]
-        frames = log_probs[span.start : span.end]
-        own = frames[:, target]
-        others = frames.copy()
+        own_span = log_probs[span.start : span.end, target]
+        lo = 0 if i == 0 else (spans[i - 1].end + span.start) // 2
+        hi = T if i == len(spans) - 1 else (span.end + spans[i + 1].start) // 2
+        search = log_probs[lo:hi]
+        own = search[:, target]
+        others = search.copy()
         others[:, target] = -np.inf
         margin = own - others.max(axis=1)
         k = int(np.argmax(margin))
         heard = target if margin[k] > 0 else int(np.argmax(others[k]))
-        out.append(TokenGop(span.token_index, float(own.mean()), float(margin[k]), heard))
+        out.append(TokenGop(span.token_index, float(own_span.mean()), float(margin[k]), heard))
     return out
 
 
