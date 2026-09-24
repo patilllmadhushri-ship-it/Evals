@@ -124,7 +124,7 @@ def score_reading(
     em: Emissions | None = None,
     notes: list[str] | None = None,
     with_gop: bool = True,
-    gop_threshold: float | None = 0.0,
+    gop_threshold: float | None = -2.0,
     audio_decides: bool = True,
     model_label: str = "",
     typed: bool = False,
@@ -229,7 +229,7 @@ def score_reading(
         "mistake_profile": dict(item.result.mistake_profile),
         "ops": ops,
     }
-    threshold = float(gop_threshold) if gop_threshold is not None else 0.0
+    threshold = float(gop_threshold) if gop_threshold is not None else -2.0
     response["wrong_letters"] = wrong_letters(response, language, threshold)
     return response
 

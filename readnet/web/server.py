@@ -266,7 +266,7 @@ def api_score(body: dict) -> dict:
     return core.score_reading(
         language=language, level=level, text=text, transcript=transcript, engine=engine, seconds=seconds,
         em=em, notes=notes, with_gop=with_gop,
-        gop_threshold=float(gop_threshold) if gop_threshold is not None else 0.0,
+        gop_threshold=float(gop_threshold) if gop_threshold is not None else -2.0,
         audio_decides=bool(body.get("audio_decides", True)),
         model_label=model_id or DEFAULT_MODELS[language], typed=engine == TYPED,
     )
